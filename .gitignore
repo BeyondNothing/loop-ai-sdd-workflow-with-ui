@@ -1,0 +1,27 @@
+.dev-workflow/
+.venv/
+.venv-test/
+__pycache__/
+*.egg-info/
+*.pyc
+.env
+config/ai-rules.yaml
+.langgraph_api/
+
+# Auto-generated MCP configs (start.sh / run.py → cli_sync)
+.cursor/mcp.json
+.mcp.json
+.omp/mcp.json
+.omp/config.yml
+.codex/
+
+# auth-service secrets & local data
+auth-service/.env
+auth-service/**/*.db
+auth-service/data/*.db
+*.db
+
+# apps/auth-service (Maven)
+apps/auth-service/target/
+apps/auth-service/.env
+apps/auth-service/*.iml
