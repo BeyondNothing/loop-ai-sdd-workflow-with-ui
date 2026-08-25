@@ -1,0 +1,52 @@
+# ai4se-sdd-loop-workflow 项目扩展规则（ACE 商家域）
+# 由 ai4se 启动时按节点注入 {{ai_rules}}；本文件不提交仓库。
+# rule 文件位于 <app_root>/ai-rules/（默认 app_root=..，即本仓库上一级）。
+
+ai_rules_dir: ai-rules
+
+nodes:
+  # 需求分析：判断影响范围/风险/验收，需知道模块边界、身份安全、技术栈兼容性
+  analyze_requirements:
+    - ddd-design-standard.md
+    - identity-security-standard.md
+    - tech-stack-standard.md
+
+  # 制定计划：架构/模块/接口/数据模型/里程碑
+  create_plan:
+    - ddd-design-standard.md
+    - api-design-standard.md
+    - database-standard.md
+    - tech-stack-standard.md
+
+  # 设计测试用例：TC-UNIT / TC-API
+  design_test_cases:
+    - unit-test-standard.md
+    - test-case-standard.md
+    - api-design-standard.md
+
+  # 计划与测试用例评审：业务视角比对覆盖/一致（不深入实现细节）
+  review_plan_and_tests:
+    - test-case-standard.md
+    - api-design-standard.md
+    - unit-test-standard.md
+
+  # 任务拆分：API 详细设计为主（路径/方法/请求/响应/状态码/鉴权/错误）
+  split_tasks:
+    - api-design-standard.md
+    - ddd-design-standard.md
+    - tech-stack-standard.md
+
+  # 代码实现：只写生产代码（不注入测试规约，避免诱导提前写测试）
+  implement_code:
+    - ddd-design-standard.md
+    - api-design-standard.md
+    - database-standard.md
+    - identity-security-standard.md
+    - exception-response-standard.md
+    - tech-stack-standard.md
+
+  # 测试自验证：写/跑单测、API、E2E
+  verify_tests:
+    - unit-test-standard.md
+    - test-case-standard.md
+    - api-design-standard.md

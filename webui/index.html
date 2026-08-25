@@ -132,6 +132,20 @@
       resize: vertical;
     }
 
+    .workbench-name {
+      width: 100%;
+      border: 1px solid #2a3b5c;
+      border-radius: 8px;
+      background: #0a1526;
+      color: #cdddf5;
+      padding: 8px;
+      font-size: 12px;
+      min-height: 34px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .section-actions {
       display: flex;
       gap: 6px;
@@ -427,7 +441,7 @@
           </div>
 
           <label>当前任务</label>
-          <input id="run-name" placeholder="请先在中间列创建并选择任务" />
+          <div id="run-name" class="workbench-name" title="">—</div>
 
           <label>PRD 路径（可选，优先读取）</label>
           <input id="run-prd-path" placeholder="可填写绝对路径或相对项目路径" />
@@ -436,19 +450,18 @@
           <textarea id="run-requirement" placeholder="输入或粘贴需求内容..."></textarea>
 
           <div class="section-actions">
-            <button class="btn" onclick="toggleFlag('headless')" id="flag-headless">全部节点无界面模式: 开</button>
             <button class="btn" onclick="toggleFlag('skipClar')" id="flag-skipclar">跳过需求澄清: 开</button>
             <button class="btn primary" onclick="startRun()">执行任务</button>
           </div>
           <div id="run-msg" class="muted" style="margin-top: 8px;"></div>
-          <div style="margin-top: 10px;">
-            <button class="btn" onclick="loadRuns()">刷新状态</button>
-          </div>
         </article>
 
         <div class="status-stack">
           <article class="card">
-            <h2>节点状态概览</h2>
+            <div class="col-head">
+              <h2>节点状态概览</h2>
+              <button class="btn inline" onclick="loadRuns()">刷新状态</button>
+            </div>
             <div id="run-overview" class="chips"><span class="muted">尚未选择任务</span></div>
           </article>
 
@@ -490,8 +503,7 @@
       <input id="bind-path" placeholder="/path/to/project" />
       <label>文档目录（相对路径）</label>
       <input id="bind-docs" value="docs" />
-      <label>规则目录（相对路径）</label>
-      <input id="bind-rules-dir" value="ai-rules" />
+      <div class="muted">创建后点“规则”配置（扫描多选）；未配置时使用内置默认规则集</div>
       <div class="section-actions" style="margin-top: 12px;">
         <button class="btn primary" id="project-submit-btn" onclick="submitProjectForm()">创建并进入</button>
         <button class="btn" onclick="closeProjectModal()">取消</button>
@@ -504,9 +516,9 @@
   <div id="rules-modal-mask" class="modal-mask">
     <div class="modal">
       <h3>规则配置</h3>
-      <div class="muted">项目级规则目录与节点规则文件映射</div>
-      <label>规则目录（相对项目路径或绝对路径）</label>
-      <input id="rules-dir-input" placeholder="ai-rules" />
+      <div class="muted">项目级规则目录与节点规则文件映射；留空使用内置默认规则集（目录可独立于项目，支持绝对路径）</div>
+      <label>规则目录（留空=默认；相对项目路径或绝对路径）</label>
+      <input id="rules-dir-input" placeholder="留空使用默认规则集" />
       <div class="section-actions">
         <button class="btn" onclick="scanRuleFiles()">扫描文件</button>
         <button class="btn primary" onclick="saveRulesConfig()">保存规则</button>
@@ -555,10 +567,19 @@
       ruleFiles: [],
       nodeRules: {},
       ui: { leftCollapsed: false },
-      flags: { headless: true, skipClar: true },
+      flags: { skipClar: true },
     };
 
     const el = (id) => document.getElementById(id);
+
+    function setTaskName(name) {
+      el("run-name").textContent = name || "—";
+      el("run-name").title = name || "";
+    }
+
+    function getTaskName() {
+      return el("run-name").textContent.trim();
+    }
 
     async function api(path, options = {}) {
       const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -625,7 +646,7 @@
     }
 
     function clearWorkbench() {
-      el("run-name").value = "";
+      setTaskName("");
       el("run-prd-path").value = "";
       el("run-requirement").value = "";
       renderNodeGrid(null);
@@ -638,7 +659,6 @@
       const tasks = selectedProjectTasks();
       const idx = tasks.findIndex((t) => t.task_id === state.selectedTaskId);
       if (idx < 0) return;
-      tasks[idx].task_name = el("run-name").value.trim() || tasks[idx].task_name;
       tasks[idx].requirement_prd_path = el("run-prd-path").value;
       tasks[idx].requirement_text = el("run-requirement").value;
       tasks[idx].updated_at = new Date().toISOString();
@@ -657,7 +677,7 @@
       state.selectedTaskId = taskId;
       const task = selectedProjectTasks().find((t) => t.task_id === taskId);
       if (!task) return;
-      el("run-name").value = task.task_name || "";
+      setTaskName(task.task_name || "");
       el("run-prd-path").value = task.requirement_prd_path || "";
       el("run-requirement").value = task.requirement_text || "";
       renderTaskList();
@@ -768,7 +788,7 @@
               body: JSON.stringify({ task_name: name }),
             });
             tasks[idx] = { ...tasks[idx], task_name: name, updated_at: new Date().toISOString() };
-            if (state.selectedTaskId === state.editingTaskId) el("run-name").value = name;
+            if (state.selectedTaskId === state.editingTaskId) setTaskName(name);
           }
         } else {
           const created = await api(`/api/projects/${projectId}/tasks`, {
@@ -782,7 +802,7 @@
           const task = created.task;
           tasks.unshift(task);
           state.selectedTaskId = task.task_id;
-          el("run-name").value = task.task_name;
+          setTaskName(task.task_name);
           el("run-prd-path").value = "";
           el("run-requirement").value = "";
         }
@@ -821,7 +841,6 @@
         el("bind-name").value = project.name;
         el("bind-path").value = project.app_root;
         el("bind-docs").value = project.docs_dir;
-        el("bind-rules-dir").value = project.ai_rules_dir;
       } else {
         state.editingProjectId = "";
         el("project-modal-title").textContent = "新建项目";
@@ -829,7 +848,6 @@
         el("bind-name").value = "";
         el("bind-path").value = "";
         el("bind-docs").value = "docs";
-        el("bind-rules-dir").value = "ai-rules";
       }
       el("bind-msg").textContent = "";
       el("project-modal-mask").classList.add("open");
@@ -850,7 +868,7 @@
       if (!state.selectedProjectId) return;
       const data = await api(`/api/projects/${state.selectedProjectId}/rules`);
       state.nodeRules = data.node_rules || {};
-      el("rules-dir-input").value = data.ai_rules_dir || "ai-rules";
+      el("rules-dir-input").value = data.ai_rules_dir || "";
       await scanRuleFiles(false);
       renderRulesGrid();
     }
@@ -866,7 +884,7 @@
 
     async function scanRuleFiles(showHint = true) {
       if (!state.selectedProjectId) return;
-      const dir = (el("rules-dir-input").value || "").trim() || "ai-rules";
+      const dir = (el("rules-dir-input").value || "").trim() ;
       const q = encodeURIComponent(dir);
       const data = await api(`/api/projects/${state.selectedProjectId}/rule-files?ai_rules_dir=${q}`);
       state.ruleFiles = data.files || [];
@@ -901,7 +919,7 @@
         node_rules[node.id] = files;
       }
       const payload = {
-        ai_rules_dir: (el("rules-dir-input").value || "").trim() || "ai-rules",
+        ai_rules_dir: (el("rules-dir-input").value || "").trim() ,
         node_rules,
       };
       await api(`/api/projects/${state.selectedProjectId}/rules`, {
@@ -916,7 +934,6 @@
         name: el("bind-name").value,
         app_root: el("bind-path").value,
         docs_dir: el("bind-docs").value || "docs",
-        ai_rules_dir: el("bind-rules-dir").value || "ai-rules",
       };
       try {
         let data;
@@ -1024,7 +1041,6 @@
 
     function toggleFlag(flag) {
       state.flags[flag] = !state.flags[flag];
-      el("flag-headless").textContent = `全部节点无界面模式: ${state.flags.headless ? "开" : "关"}`;
       el("flag-skipclar").textContent = `跳过需求澄清: ${state.flags.skipClar ? "开" : "关"}`;
     }
 
@@ -1060,12 +1076,12 @@
       try {
         const payload = {
           project_id: state.selectedProjectId,
-          requirement_name: el("run-name").value,
+          requirement_name: getTaskName(),
           requirement,
           requirement_prd_path: requirementPrdPath,
           tool: "omp",
           skip_clarification: state.flags.skipClar,
-          headless_all_nodes: state.flags.headless,
+          headless_all_nodes: false,
           fresh: false,
           skip_mcp_setup: false,
         };
@@ -1099,7 +1115,7 @@
           }
         }
         if (state.selectedTaskId) {
-          const taskName = el("run-name").value.trim();
+          const taskName = getTaskName();
           const matched = projectRuns.find((r) => (r.requirement_name || "") === taskName);
           if (matched) {
             state.selectedRunId = matched.run_id;

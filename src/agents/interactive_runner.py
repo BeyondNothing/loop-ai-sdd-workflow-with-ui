@@ -7,7 +7,6 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -18,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _POLL_SECONDS = 1.0
 _WARP_LAUNCH_TIMEOUT_SECONDS = 45 * 60
+_WARP_LAUNCHER_PATH = Path("/tmp/ai4se_warp_launch.sh")
 
 
 def run_interactive_subprocess(
@@ -101,7 +101,7 @@ def _run_interactive_via_warp_window(
     time.sleep(1.0)
     launcher = _write_warp_launcher_script(cmd, cwd, env)
     logger.info("Warp 启动脚本已生成: %s", launcher)
-    _send_command_to_frontmost_warp(shlex_quote(str(launcher)))
+    _send_command_to_frontmost_warp(f"bash {shlex_quote(str(launcher))}")
 
     start = time.time()
     while True:
@@ -127,28 +127,22 @@ def _write_warp_launcher_script(
     cwd: str,
     env: dict[str, str] | None,
 ) -> Path:
-    fd, path = tempfile.mkstemp(prefix="ai4se_warp_", suffix=".sh")
-    launcher = Path(path)
-    try:
-        lines = [
-            "#!/usr/bin/env bash",
-            "set -e",
-            # Ensure temp launcher is removed even when command fails.
-            "trap 'rm -f -- \"$0\"' EXIT",
-        ]
-        lines.append(f"cd {shlex_quote(str(Path(cwd).resolve()))}")
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -e",
+    ]
+    lines.append(f"cd {shlex_quote(str(Path(cwd).resolve()))}")
 
-        if env:
-            for key in ("OMP_MCP_TIMEOUT_MS", "PATH"):
-                value = env.get(key)
-                if value:
-                    lines.append(f"export {key}={shlex_quote(value)}")
+    if env:
+        for key in ("OMP_MCP_TIMEOUT_MS", "PATH"):
+            value = env.get(key)
+            if value:
+                lines.append(f"export {key}={shlex_quote(value)}")
 
-        lines.append(" ".join(shlex_quote(part) for part in cmd))
-        os.write(fd, ("\n".join(lines) + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    launcher.chmod(0o700)
+    lines.append(" ".join(shlex_quote(part) for part in cmd))
+    _WARP_LAUNCHER_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _WARP_LAUNCHER_PATH.chmod(0o700)
+    launcher = _WARP_LAUNCHER_PATH
     return launcher
 
 

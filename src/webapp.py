@@ -41,7 +41,7 @@ class ProjectBinding:
     name: str
     app_root: str
     docs_dir: str = "docs"
-    ai_rules_dir: str = "ai-rules"
+    ai_rules_dir: str = ""
     node_rules: dict[str, list[str]] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
@@ -65,7 +65,7 @@ class ProjectBinding:
             name=str(raw["name"]),
             app_root=str(raw["app_root"]),
             docs_dir=str(raw.get("docs_dir") or "docs"),
-            ai_rules_dir=str(raw.get("ai_rules_dir") or "ai-rules"),
+            ai_rules_dir=str(raw.get("ai_rules_dir") or ""),
             node_rules={
                 str(k): [str(item) for item in (v or [])]
                 for k, v in (raw.get("node_rules") or {}).items()
@@ -188,7 +188,7 @@ class WebState:
         name: str,
         app_root: str,
         docs_dir: str = "docs",
-        ai_rules_dir: str = "ai-rules",
+        ai_rules_dir: str = "",
     ) -> dict[str, Any]:
         path = Path(app_root).expanduser().resolve()
         if not path.is_dir():
@@ -202,7 +202,7 @@ class WebState:
                 name=name.strip() or path.name,
                 app_root=str(path),
                 docs_dir=docs_dir.strip() or "docs",
-                ai_rules_dir=ai_rules_dir.strip() or "ai-rules",
+                ai_rules_dir=ai_rules_dir.strip() or "",
                 created_at=now,
                 updated_at=now,
             )
@@ -217,7 +217,7 @@ class WebState:
         name: str,
         app_root: str,
         docs_dir: str,
-        ai_rules_dir: str,
+        ai_rules_dir: str = "",
     ) -> dict[str, Any]:
         path = Path(app_root).expanduser().resolve()
         if not path.is_dir():
@@ -230,7 +230,7 @@ class WebState:
             binding.name = name.strip() or path.name
             binding.app_root = str(path)
             binding.docs_dir = docs_dir.strip() or "docs"
-            binding.ai_rules_dir = ai_rules_dir.strip() or "ai-rules"
+            binding.ai_rules_dir = ai_rules_dir.strip() or ""
             binding.updated_at = datetime.now().isoformat(timespec="seconds")
             self.bindings[project_id] = binding
             self._save_bindings()
@@ -268,7 +268,7 @@ class WebState:
             binding = self.bindings.get(project_id)
             if binding is None:
                 raise KeyError(f"Unknown project_id: {project_id}")
-            binding.ai_rules_dir = ai_rules_dir.strip() or "ai-rules"
+            binding.ai_rules_dir = ai_rules_dir.strip() or ""
             binding.node_rules = {
                 node_id: [item.strip() for item in rules if item.strip()]
                 for node_id, rules in node_rules.items()
@@ -394,13 +394,44 @@ class WebApp:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _default_rules_dir(self) -> Path:
+        """工作流内置默认规则集：default-rules/（解耦于任何代码库）。"""
+        path = self.workflow_root / "default-rules"
+        if not path.is_dir():
+            logger.warning("内置默认规则目录不存在: %s", path)
+        return path.resolve()
+
+    def _default_node_rules(self) -> dict[str, list[str]]:
+        """内置默认节点→规则映射：default-rules/ai-rules.yaml；缺失则回退 config/ai-rules.yaml。"""
+        candidates = [
+            self.workflow_root / "default-rules" / "ai-rules.yaml",
+            self.workflow_root / "config" / "ai-rules.yaml",
+        ]
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                nodes_raw = data.get("nodes") or {}
+                if isinstance(nodes_raw, dict):
+                    return {
+                        str(k): [str(i).strip() for i in (v or []) if str(i).strip()]
+                        for k, v in nodes_raw.items()
+                        if isinstance(v, list)
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("读取默认规则映射失败 %s: %s", path, exc)
+        return {}
+
     def _resolve_rules_dir(self, project_id: str, ai_rules_dir: str | None = None) -> Path:
         binding = self.state.get_binding(project_id)
-        rules_dir = (ai_rules_dir or binding.ai_rules_dir or "ai-rules").strip()
+        rules_dir = (ai_rules_dir or binding.ai_rules_dir or "").strip()
+        if not rules_dir:
+            # 未绑定规则目录 → 使用工作流内置默认规则集（解耦于代码库）
+            return self._default_rules_dir()
         path = Path(rules_dir).expanduser()
         if not path.is_absolute():
             path = Path(binding.app_root) / path
-
         return path.resolve()
 
     @staticmethod
@@ -504,9 +535,11 @@ class WebApp:
             encoding="utf-8",
         )
 
+        effective_rules_dir = str(self._resolve_rules_dir(run.project_id))
+        effective_node_rules = binding.node_rules or self._default_node_rules()
         runtime_rules = {
-            "ai_rules_dir": binding.ai_rules_dir,
-            "node_rules": binding.node_rules,
+            "ai_rules_dir": effective_rules_dir,
+            "node_rules": effective_node_rules,
         }
         (runtime_dir / "ai-rules.yaml").write_text(
             yaml.safe_dump(runtime_rules, allow_unicode=True, sort_keys=False),
@@ -709,7 +742,7 @@ class WebApp:
                 name=str(payload.get("name") or "").strip(),
                 app_root=str(payload.get("app_root") or "").strip(),
                 docs_dir=str(payload.get("docs_dir") or "docs"),
-                ai_rules_dir=str(payload.get("ai_rules_dir") or "ai-rules"),
+                ai_rules_dir=str(payload.get("ai_rules_dir") or ""),
             )
             self._send_json(handler, HTTPStatus.CREATED, {"project": binding})
             return
@@ -725,7 +758,7 @@ class WebApp:
                     raise ValueError("node_rules must be an object")
                 updated = self.state.update_rules(
                     project_id,
-                    ai_rules_dir=str(payload.get("ai_rules_dir") or "ai-rules"),
+                    ai_rules_dir=str(payload.get("ai_rules_dir") or ""),
                     node_rules={
                         str(k): [str(item) for item in (v if isinstance(v, list) else [])]
                         for k, v in node_rules.items()
@@ -792,7 +825,7 @@ class WebApp:
                 name=str(payload.get("name") or "").strip(),
                 app_root=str(payload.get("app_root") or "").strip(),
                 docs_dir=str(payload.get("docs_dir") or "docs"),
-                ai_rules_dir=str(payload.get("ai_rules_dir") or "ai-rules"),
+                ai_rules_dir=str(payload.get("ai_rules_dir") or ""),
             )
             self._send_json(handler, HTTPStatus.OK, {"project": updated})
             return
