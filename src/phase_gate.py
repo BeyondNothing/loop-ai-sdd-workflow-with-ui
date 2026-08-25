@@ -183,6 +183,9 @@ def phase_complete(docs_dir: Path, node_id: str, state: DevWorkflowState) -> boo
     cfg = PHASE_CONFIGS.get(node_id)
     if cfg and not cfg.requires_approval:
         return True
+    # 跳过澄清/无人确认时自动通过审批门（headless 自动跑通）——无人工确认则不等待
+    if state.get("skip_clarification"):
+        return True
     return phase_user_approved(docs_dir, node_id)
 
 

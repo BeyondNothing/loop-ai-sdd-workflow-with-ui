@@ -287,6 +287,83 @@
       margin-top: 0;
     }
 
+    .rule-dropdown {
+      position: relative;
+      margin: 6px 0 4px;
+    }
+
+    .rule-dropdown-toggle {
+      width: 100%;
+      text-align: left;
+      padding: 6px 10px;
+      background: #0f1b31;
+      color: #e6edf7;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .rule-menu {
+      display: none;
+      position: absolute;
+      z-index: 20;
+      margin-top: 4px;
+      left: 0;
+      right: 0;
+      background: #0f1b31;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-height: 220px;
+      overflow: auto;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+    }
+
+    .rule-menu-item {
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .rule-menu-item:hover {
+      background: #1b3a6b;
+    }
+
+    .rule-menu-item.checked {
+      color: #9fc2ff;
+      background: #14284a;
+    }
+
+    .rule-menu-empty {
+      padding: 8px 10px;
+      color: #8898b0;
+    }
+
+    .rule-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .rule-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #1b3a6b;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+    }
+
+    .rule-tag button {
+      border: 0;
+      background: transparent;
+      color: #9fc2ff;
+      cursor: pointer;
+      padding: 0 2px;
+      font-size: 14px;
+      line-height: 1;
+    }
+
     .chips {
       display: flex;
       gap: 6px;
@@ -343,14 +420,55 @@
     .node .artifact { margin-top: auto; font-size: 11px; min-height: 30px; display: flex; align-items: flex-end; }
 
     .artifact-link {
-      border: none;
+      color: var(--accent, #6ea8fe);
+      cursor: pointer;
       background: transparent;
-      color: #8cc1ff;
+      border: 0;
+      padding: 0;
+      font-size: 13px;
+    }
+
+    .artifact-section-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.4px;
+      margin: 14px 0 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #22304a;
+    }
+
+    .artifact-section-title::before {
+      content: "";
+      width: 4px;
+      height: 14px;
+      border-radius: 2px;
+      background: linear-gradient(180deg, #6ea8fe, #a78bfa);
+      flex: none;
+    }
+
+    .task-files-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 6px 0;
+    }
+
+    .task-file-link {
+      display: block;
+      color: #6ea8fe;
       text-decoration: underline;
       cursor: pointer;
-      padding: 0;
-      text-align: left;
-      word-break: break-all;
+      font-size: 13px;
+      padding: 2px 0;
+    }
+
+    .task-file-link:hover {
+      color: #9fc2ff;
+    }
       font-size: 11px;
     }
 
@@ -457,21 +575,14 @@
         </article>
 
         <div class="status-stack">
-          <article class="card">
-            <div class="col-head">
-              <h2>节点状态概览</h2>
-              <button class="btn inline" onclick="loadRuns()">刷新状态</button>
-            </div>
-            <div id="run-overview" class="chips"><span class="muted">尚未选择任务</span></div>
-          </article>
-
           <article class="card" style="display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 8px;">
             <div>
               <h2 style="margin-bottom: 6px;">产物与执行详情</h2>
-              <div class="muted">右侧集中展示节点产物、状态与日志</div>
             </div>
             <div>
-              <div class="nodes" id="node-grid"></div>
+              <div class="artifact-section-title">磁盘产物目录</div>
+              <div id="task-files" class="task-files-tree"></div>
+              <div class="artifact-section-title">日志信息</div>
               <pre id="run-detail">选择任务后可查看日志与错误信息。</pre>
             </div>
           </article>
@@ -564,8 +675,9 @@
       editingTaskId: "",
       projectModalMode: "create",
       editingProjectId: "",
-      ruleFiles: [],
-      nodeRules: {},
+      taskArtifacts: { node_outputs: {}, completed_nodes: [] },
+      taskFiles: [],
+      ui: { leftCollapsed: false },
       ui: { leftCollapsed: false },
       flags: { skipClar: true },
     };
@@ -673,7 +785,75 @@
       renderTaskList();
     }
 
-    function selectTask(taskId) {
+    async function loadTaskArtifacts(taskName) {
+      state.taskArtifacts = { node_outputs: {}, completed_nodes: [] };
+      if (!state.selectedProjectId || !taskName) return;
+      try {
+        const data = await api(`/api/projects/${state.selectedProjectId}/task-artifacts?name=${encodeURIComponent(taskName)}`);
+        state.taskArtifacts = { node_outputs: data.node_outputs || {}, completed_nodes: data.completed_nodes || [] };
+      } catch (e) { /* ignore */ }
+    }
+
+    async function loadTaskFiles(taskName) {
+      state.taskFiles = [];
+      if (!state.selectedProjectId || !taskName) return;
+      try {
+        const data = await api(`/api/projects/${state.selectedProjectId}/task-files?name=${encodeURIComponent(taskName)}`);
+        state.taskFiles = (data.files || []).filter((f) => f.name && !f.name.startsWith("."));
+      } catch (e) { /* ignore */ }
+      renderTaskFiles();
+    }
+
+    function renderTaskFiles() {
+      const root = el("task-files");
+      if (!root) return;
+      root.innerHTML = "";
+      if (!state.taskFiles.length) {
+        root.innerHTML = '<span class="muted">磁盘目录下暂无产物文件</span>';
+        return;
+      }
+      const items = [...state.taskFiles].sort((a, b) => (a.rel || a.name || "").localeCompare(b.rel || b.name || ""));
+      const seenDirs = new Set();
+      for (const f of items) {
+        const rel = f.rel || f.name;
+        const parts = rel.split("/");
+        const depth = parts.length - 1;
+        for (let i = 1; i <= depth; i++) {
+          const dirPath = parts.slice(0, i).join("/");
+          if (!seenDirs.has(dirPath)) {
+            seenDirs.add(dirPath);
+            const d = document.createElement("div");
+            d.className = "task-dir";
+            d.style.paddingLeft = (i - 1) * 14 + "px";
+            d.textContent = dirPath + " /";
+            root.appendChild(d);
+          }
+        }
+        const a = document.createElement("a");
+        a.className = "task-file-link";
+        a.href = "#";
+        a.style.marginLeft = depth * 14 + "px";
+        a.textContent = f.name;
+        a.title = f.abs || "";
+        a.onclick = (e) => { e.preventDefault(); openTaskFile(f.abs); };
+        root.appendChild(a);
+      }
+    }
+
+    async function openTaskFile(abs) {
+      if (!abs) { el("run-msg").textContent = "缺少文件路径"; return; }
+      try {
+        const data = await api(`/api/projects/${state.selectedProjectId}/task-files`, {
+          method: "POST",
+          body: JSON.stringify({ abs }),
+        });
+        el("run-msg").textContent = `已在访达打开: ${data.opened}`;
+      } catch (err) {
+        el("run-msg").textContent = String(err);
+      }
+    }
+
+    async function selectTask(taskId) {
       state.selectedTaskId = taskId;
       const task = selectedProjectTasks().find((t) => t.task_id === taskId);
       if (!task) return;
@@ -681,7 +861,8 @@
       el("run-prd-path").value = task.requirement_prd_path || "";
       el("run-requirement").value = task.requirement_text || "";
       renderTaskList();
-
+            await loadTaskArtifacts(task.task_name || "");
+      await loadTaskFiles(task.task_name || "");
       const match = state.runs.find((r) => r.project_id === state.selectedProjectId && (r.requirement_name || "") === (task.task_name || ""));
       if (match) {
         state.selectedRunId = match.run_id;
@@ -899,28 +1080,85 @@
         const row = document.createElement("div");
         row.className = "rule-row";
         const selected = state.nodeRules[node.id] || [];
-        const options = state.ruleFiles
-          .map((f) => `<option value="${f}" ${selected.includes(f) ? "selected" : ""}>${f}</option>`)
+        const items = state.ruleFiles
+          .map((f) => {
+            const checked = selected.includes(f);
+            return `<div class="rule-menu-item${checked ? " checked" : ""}" data-file="${f}" onclick="toggleRuleFile('${node.id}', '${f}')">${checked ? "✓&nbsp;" : ""}${f}</div>`;
+          })
           .join("");
+        const count = selected.length;
         row.innerHTML = `
           <label>${node.label} (${node.id})</label>
-          <select id="rule-${node.id}" multiple size="6">${options}</select>
+          <div class="rule-dropdown">
+            <button type="button" class="rule-dropdown-toggle" id="rule-toggle-${node.id}" onclick="toggleRuleMenu('${node.id}')">${count ? `已选 ${count} 项` : "选择规则文件…"}</button>
+            <div class="rule-menu" id="rule-menu-${node.id}">${items || '<div class="rule-menu-empty">无规则文件，先扫描</div>'}</div>
+          </div>
+          <div class="rule-tags" id="rule-tags-${node.id}">${buildRuleTags(node.id)}</div>
         `;
         root.appendChild(row);
       }
     }
 
+    function buildRuleTags(nodeId) {
+      const selected = state.nodeRules[nodeId] || [];
+      if (!selected.length) return '<span class="muted">未绑定规则（将使用默认）</span>';
+      return selected
+        .map((f) => `<span class="rule-tag">${f}<button type="button" onclick="removeRuleForNode('${nodeId}', '${f}')">×</button></span>`)
+        .join("");
+    }
+
+    function toggleRuleMenu(nodeId) {
+      const menu = el(`rule-menu-${nodeId}`);
+      const isOpen = menu.style.display !== "none";
+      document.querySelectorAll(".rule-menu").forEach((m) => (m.style.display = "none"));
+      menu.style.display = isOpen ? "none" : "block";
+    }
+
+    // 点规则项：勾选/取消，只更新标签与勾选态，保持下拉面板打开
+    function toggleRuleFile(nodeId, file) {
+      const set = new Set(state.nodeRules[nodeId] || []);
+      if (set.has(file)) set.delete(file);
+      else set.add(file);
+      state.nodeRules[nodeId] = [...set];
+      const checked = set.has(file);
+      el(`rule-tags-${nodeId}`).innerHTML = buildRuleTags(nodeId);
+      const item = document.querySelector(`#rule-menu-${nodeId} [data-file="${file}"]`);
+      if (item) {
+        item.classList.toggle("checked", checked);
+        item.innerHTML = (checked ? "✓&nbsp;" : "") + file;
+      }
+      refreshRuleToggle(nodeId);
+    }
+
+    function refreshRuleToggle(nodeId) {
+      const count = (state.nodeRules[nodeId] || []).length;
+      el(`rule-toggle-${nodeId}`).textContent = count ? `已选 ${count} 项` : "选择规则文件…";
+    }
+
+    function removeRuleForNode(nodeId, file) {
+      const set = new Set(state.nodeRules[nodeId] || []);
+      set.delete(file);
+      state.nodeRules[nodeId] = [...set];
+      el(`rule-tags-${nodeId}`).innerHTML = buildRuleTags(nodeId);
+      const item = document.querySelector(`#rule-menu-${nodeId} [data-file="${file}"]`);
+      if (item) {
+        item.classList.remove("checked");
+        item.innerHTML = file;
+      }
+      refreshRuleToggle(nodeId);
+    }
+    // 点击面板外关闭所有规则下拉
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".rule-dropdown")) {
+        document.querySelectorAll(".rule-menu").forEach((m) => (m.style.display = "none"));
+      }
+    });
+
     async function saveRulesConfig() {
       if (!state.selectedProjectId) return;
-      const node_rules = {};
-      for (const node of RULE_NODE_OPTIONS) {
-        const select = el(`rule-${node.id}`);
-        const files = Array.from(select?.selectedOptions || []).map((o) => o.value).filter(Boolean);
-        node_rules[node.id] = files;
-      }
       const payload = {
-        ai_rules_dir: (el("rules-dir-input").value || "").trim() ,
-        node_rules,
+        ai_rules_dir: (el("rules-dir-input").value || "").trim(),
+        node_rules: state.nodeRules,
       };
       await api(`/api/projects/${state.selectedProjectId}/rules`, {
         method: "POST",
@@ -972,33 +1210,66 @@
       return `<span class="chip ${safe}">${safe}</span>`;
     }
 
+    const NODE_FILE_MAP = {
+      "analyze_requirements": "01-requirements.md",
+      "create_plan": "02-plan.md",
+      "design_test_cases": "02-test-cases.md",
+      "review_plan_and_tests": "02-plan-test-review.md",
+      "split_tasks": "03-tasks.md",
+      "implement_code": "04-implementation.md",
+      "verify_tests": "05-test-report.md",
+    };
+
     function deriveNodeStatuses(run) {
       const result = run?.result || {};
-      const outputs = result.node_outputs || {};
-      const completed = new Set(result.completed_nodes || []);
-      const currentNode = result.current_node || "";
+      const disk = state.taskArtifacts.node_outputs || {};
+      // 按任务名扫到的磁盘文件（文件名→节点）注入，保证卡片一定显示磁盘产物
+      const diskFiles = (state.taskFiles || []);
+      const outputs = { ...disk, ...(result.node_outputs || {}) };
+      const abs = {};
+      const completed = new Set([...(state.taskArtifacts.completed_nodes || []), ...(result.completed_nodes || [])]);
+      const appRoot = selectedProject()?.app_root || "";
+      const toAbs = (v) => (v && v.startsWith("/") ? v : appRoot ? `${appRoot}/${v}` : v);
+      for (const k of Object.keys(outputs)) { abs[k] = toAbs(outputs[k]); }
+      for (const f of diskFiles) {
+        for (const nid in NODE_FILE_MAP) {
+          if (NODE_FILE_MAP[nid] === f.name) { outputs[nid] = f.abs || f.name; abs[nid] = f.abs || toAbs(f.name); completed.add(nid); break; }
+        }
+      }
+      let currentNode = result.current_node || "";
+      if (!Object.keys(outputs).length && completed.size) {
+        currentNode = [...completed].pop();
+      }
       return NODE_IDS.map((nodeId) => {
         let status = "queued";
+        const hasOut = outputs[nodeId] || completed.has(nodeId);
         if (run?.status === "completed") {
-          status = outputs[nodeId] || completed.has(nodeId) ? "completed" : "skipped";
+          status = hasOut ? "completed" : "skipped";
         } else if (run?.status === "failed") {
-          if (outputs[nodeId] || completed.has(nodeId)) status = "completed";
-          else if (currentNode === nodeId) status = "failed";
+          status = hasOut ? "completed" : (currentNode === nodeId ? "failed" : "queued");
         } else if (run?.status === "running") {
-          if (outputs[nodeId] || completed.has(nodeId)) status = "completed";
-          else if (currentNode === nodeId) status = "running";
+          status = hasOut ? "completed" : (currentNode === nodeId ? "running" : "queued");
+        } else {
+          status = hasOut ? "completed" : "queued";
         }
-        return { nodeId, title: NODE_TITLES[nodeId], status, artifact: outputs[nodeId] || "等待产物" };
+        return {
+          nodeId,
+          title: NODE_TITLES[nodeId],
+          status,
+          artifact: abs[nodeId] ? abs[nodeId].split("/").pop() : (hasOut ? "已生成" : "等待产物"),
+          artifactAbs: abs[nodeId] || "",
+        };
       });
     }
 
     function renderNodeGrid(run) {
       const grid = el("node-grid");
+      if (!grid) return;
       grid.innerHTML = "";
       for (const node of deriveNodeStatuses(run)) {
         const hasArtifact = node.artifact && node.artifact !== "等待产物";
         const artifactHtml = hasArtifact
-          ? `<button class="artifact-link" onclick="openArtifact('${node.nodeId}')">${node.artifact}</button>`
+          ? `<button class="artifact-link" onclick="openTaskFile('${node.artifactAbs || ""}')">${node.artifact}</button>`
           : '<span class="muted">等待产物</span>';
         const card = document.createElement("div");
         card.className = "node";
@@ -1009,6 +1280,7 @@
 
     function renderRunOverview(run) {
       const box = el("run-overview");
+      if (!box) return;
       box.innerHTML = "";
       if (!run) {
         box.innerHTML = '<span class="muted">尚未选择任务</span>';
@@ -1081,7 +1353,7 @@
           requirement_prd_path: requirementPrdPath,
           tool: "omp",
           skip_clarification: state.flags.skipClar,
-          headless_all_nodes: false,
+          headless_all_nodes: true,
           fresh: false,
           skip_mcp_setup: false,
         };
@@ -1097,6 +1369,8 @@
     async function loadRunDetail(runId) {
       const data = await api(`/api/runs/${runId}`);
       state.selectedRun = data.run || null;
+      await loadTaskArtifacts(getTaskName());
+      await loadTaskFiles(getTaskName());
       renderNodeGrid(state.selectedRun);
       renderRunOverview(state.selectedRun);
       renderRunDetail(state.selectedRun);

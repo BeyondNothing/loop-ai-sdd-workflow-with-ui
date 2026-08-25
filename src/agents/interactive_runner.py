@@ -77,15 +77,16 @@ def run_interactive_subprocess(
 
 
 def _should_bridge_to_warp(completion_check: CompletionCheck | None) -> bool:
-    # Web UI runs often have no TTY; local interactive subprocess then becomes "silent".
-    # In that case, prefer launching a visible Warp window.
+    # Web UI 服务可能从终端/PTY 启动，进程 stdin/stdout 是 TTY；若按 TTY 判断会误判为“内联执行”，
+    # 导致交互节点不开 Warp 窗口（原版也因此最初不弹窗）。因此 darwin 下默认一律桥接到新 Warp 窗口，
+    # 让每个交互节点可见可交互。纯 CLI 想内联跑: export AI4SE_WARP_BRIDGE=0
     if completion_check is None:
         return False
     if os.getenv("AI4SE_WARP_BRIDGE", "1").strip() in {"0", "false", "False"}:
         return False
     if sys.platform != "darwin":
         return False
-    return not (sys.stdin.isatty() and sys.stdout.isatty())
+    return True
 
 
 def _run_interactive_via_warp_window(
@@ -147,10 +148,14 @@ def _write_warp_launcher_script(
 
 
 def _send_command_to_frontmost_warp(command_line: str) -> None:
+    # 用剪贴板粘贴命令，避免 keystroke 逐字输入丢字符（如 bsh 少 a）。
+    subprocess.run(["pbcopy"], input=command_line.encode("utf-8"), check=False)
     script = [
         'tell application "Warp" to activate',
+        "delay 0.3",
         'tell application "System Events"',
-        f'keystroke "{_escape_applescript_text(command_line)}"',
+        'keystroke "v" using command down',
+        "delay 0.1",
         "key code 36",
         "end tell",
     ]

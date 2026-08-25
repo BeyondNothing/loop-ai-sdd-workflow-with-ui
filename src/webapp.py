@@ -7,7 +7,9 @@ import logging
 import subprocess
 import sys
 import threading
+import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
@@ -20,6 +22,8 @@ import yaml
 
 from .config_loader import load_workflow_config
 from .mcp import ensure_mcp_for_agents
+from .requirement_dir import resolve_requirement_docs_dir
+from .router import is_workflow_complete
 from .workflow import DevWorkflow
 
 logger = logging.getLogger(__name__)
@@ -118,12 +122,36 @@ class WorkflowRun:
             "logs": self.logs,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "WorkflowRun":
+        return cls(
+            run_id=str(raw["run_id"]),
+            project_id=str(raw["project_id"]),
+            status=str(raw.get("status") or "queued"),
+            requirement=str(raw.get("requirement") or ""),
+            requirement_path=str(raw.get("requirement_path") or ""),
+            requirement_name=str(raw.get("requirement_name") or ""),
+            tool=str(raw.get("tool") or "echo"),
+            skip_clarification=bool(raw.get("skip_clarification", True)),
+            fresh=bool(raw.get("fresh", False)),
+            headless_all_nodes=bool(raw.get("headless_all_nodes", True)),
+            skip_mcp_setup=bool(raw.get("skip_mcp_setup", False)),
+            docs_dir=str(raw.get("docs_dir") or ""),
+            started_at=str(raw.get("started_at") or datetime.now().isoformat(timespec="seconds")),
+            updated_at=str(raw.get("updated_at") or datetime.now().isoformat(timespec="seconds")),
+            ended_at=str(raw.get("ended_at") or ""),
+            result=raw.get("result"),
+            error=str(raw.get("error") or ""),
+            logs=[str(x) for x in (raw.get("logs") or [])],
+        )
+
 
 class WebState:
     def __init__(self, workflow_root: Path):
         self.workflow_root = workflow_root.resolve()
         self.state_dir = self.workflow_root / ".dev-workflow" / "web-ui"
         self.runtime_dir = self.state_dir / "runtime"
+        self.runs_file = self.state_dir / "runs.json"
         self.bindings_file = self.state_dir / "bindings.json"
         self.tasks_file = self.state_dir / "tasks.json"
         self.bindings: dict[str, ProjectBinding] = {}
@@ -135,6 +163,7 @@ class WebState:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._load_bindings()
         self._load_tasks()
+        self._load_runs()
 
     def _load_bindings(self) -> None:
         if not self.bindings_file.exists():
@@ -175,6 +204,34 @@ class WebState:
     def _save_tasks(self) -> None:
         self.tasks_file.write_text(
             json.dumps(self.tasks_by_project, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _load_runs(self) -> None:
+        if not self.runs_file.exists():
+            self.runs = {}
+            return
+        try:
+            raw = json.loads(self.runs_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            self.runs = {}
+            return
+        runs: dict[str, WorkflowRun] = {}
+        if isinstance(raw, dict):
+            for key, item in raw.items():
+                if isinstance(item, dict) and item.get("run_id"):
+                    item = dict(item)
+                    item.setdefault("run_id", key)
+                    try:
+                        runs[str(key)] = WorkflowRun.from_dict(item)
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        self.runs = runs
+
+    def _save_runs(self) -> None:
+        payload = {rid: run.to_dict() for rid, run in self.runs.items()}
+        self.runs_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -249,6 +306,7 @@ class WebState:
                 del self.runs[run_id]
             self._save_bindings()
             self._save_tasks()
+            self._save_runs()
 
     def get_binding(self, project_id: str) -> ProjectBinding:
         with self.lock:
@@ -356,6 +414,7 @@ class WebState:
     def create_run(self, run: WorkflowRun) -> None:
         with self.lock:
             self.runs[run.run_id] = run
+        self._save_runs()
 
     def update_run(self, run_id: str, **fields: Any) -> None:
         with self.lock:
@@ -364,6 +423,7 @@ class WebState:
                 setattr(run, key, value)
             run.updated_at = datetime.now().isoformat(timespec="seconds")
             self.runs[run_id] = run
+        self._save_runs()
 
     def append_run_log(self, run_id: str, message: str) -> None:
         stamped = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
@@ -372,6 +432,7 @@ class WebState:
             run.logs.append(stamped)
             run.updated_at = datetime.now().isoformat(timespec="seconds")
             self.runs[run_id] = run
+        self._save_runs()
 
     def get_project_run_lock(self, project_id: str) -> threading.Lock:
         """Return a stable per-project lock for run serialization."""
@@ -388,6 +449,16 @@ class WebApp:
         self.workflow_root = workflow_root.resolve()
         self.static_dir = self.workflow_root / "webui"
         self.state = WebState(self.workflow_root)
+        # 服务重启后，非终态 run 的执行线程已不存在，标记为中断，避免显示为永远 running
+        now = datetime.now().isoformat(timespec="seconds")
+        for run_id, run in self.state.runs.items():
+            if run.status in ("running", "queued"):
+                self.state.update_run(
+                    run_id,
+                    status="failed",
+                    error="服务重启，任务中断",
+                    ended_at=now,
+                )
 
     def _runtime_config_dir(self, project_id: str, run_id: str) -> Path:
         path = self.state.runtime_dir / project_id / run_id
@@ -498,6 +569,7 @@ class WebApp:
         return json.loads(data or "{}")
 
     @staticmethod
+    @staticmethod
     def _open_path(path: Path) -> str:
         target = path.expanduser().resolve()
         if not target.exists():
@@ -508,6 +580,19 @@ class WebApp:
             subprocess.Popen(["cmd", "/c", "start", "", str(target)], shell=False)
         else:
             subprocess.Popen(["xdg-open", str(target)])
+        return str(target)
+
+    @staticmethod
+    def _reveal_in_finder(path: Path) -> str:
+        target = path.expanduser().resolve()
+        if not target.exists():
+            raise ValueError(f"Path does not exist: {target}")
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        elif sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", str(target)], shell=False)
+        else:
+            subprocess.Popen(["xdg-open", str(target.parent)])
         return str(target)
 
     def _build_runtime_configs(self, run: WorkflowRun, binding: ProjectBinding) -> Path:
@@ -547,20 +632,110 @@ class WebApp:
         )
         return runtime_workflow
 
+    _RUN_MONITOR_TIMEOUT_SECONDS = 4 * 3600
+
+    @staticmethod
+    def _scan_docs_outputs(docs_abs: Path, app_root: Path) -> tuple[dict[str, str], list[str]]:
+        mapping = {
+            "analyze_requirements": "01-requirements.md",
+            "create_plan": "02-plan.md",
+            "design_test_cases": "02-test-cases.md",
+            "review_plan_and_tests": "02-plan-test-review.md",
+            "split_tasks": "03-tasks.md",
+            "implement_code": "04-implementation.md",
+            "verify_tests": "05-test-report.md",
+        }
+        node_outputs: dict[str, str] = {}
+        completed: list[str] = []
+        for node_id, filename in mapping.items():
+            file = docs_abs / filename
+            if file.is_file():
+                try:
+                    node_outputs[node_id] = str(file.relative_to(app_root))
+                except ValueError:
+                    node_outputs[node_id] = str(file)
+                completed.append(node_id)
+        return node_outputs, completed
+
+    @staticmethod
+    def _derive_running_node(completed_nodes: list[str]) -> str:
+        for node_id in NODE_IDS:
+            if node_id not in completed_nodes:
+                return node_id
+        return "route_next"
+
+    def _monitor_run_docs(self, run_id: str) -> None:
+        """后台监控：把磁盘上已生成的产物实时写入 run.result；05 出现则标记完成。"""
+        run = self.state.get_run(run_id)
+        binding = self.state.get_binding(run.project_id)
+        app_root = Path(binding.app_root).resolve()
+        try:
+            relative, _slug = resolve_requirement_docs_dir(
+                app_root,
+                binding.docs_dir,
+                run.requirement,
+                name=run.requirement_name or None,
+                source_file=Path(run.requirement_path) if run.requirement_path else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return
+        docs_abs = (app_root / relative).resolve()
+        deadline = time.time() + self._RUN_MONITOR_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            current = self.state.get_run(run_id)
+            if current.status in ("completed", "failed"):
+                return
+            if is_workflow_complete(docs_abs):
+                no, comp = self._scan_docs_outputs(docs_abs, app_root)
+                self.state.update_run(
+                    run_id,
+                    status="completed",
+                    result={
+                        "node_outputs": no,
+                        "completed_nodes": comp,
+                        "current_node": "verify_tests",
+                    },
+                    ended_at=datetime.now().isoformat(timespec="seconds"),
+                )
+                self.state.append_run_log(run_id, "Workflow 完成（产物检测）")
+                return
+            no, comp = self._scan_docs_outputs(docs_abs, app_root)
+            if no or comp:
+                self.state.update_run(
+                    run_id,
+                    result={
+                        "node_outputs": no,
+                        "completed_nodes": comp,
+                        "current_node": self._derive_running_node(comp),
+                    },
+                )
+            time.sleep(3.0)
+
     def _run_workflow(self, run_id: str) -> None:
         try:
             run = self.state.get_run(run_id)
             binding = self.state.get_binding(run.project_id)
-            project_lock = self.state.get_project_run_lock(run.project_id)
-            if project_lock.locked():
-                self.state.append_run_log(
-                    run_id,
-                    "Another run is active for this project, waiting for project lock",
-                )
+            # 中断该项目其它仍在运行的 run（用户重开即中断旧的，避免旧线程占住阻塞新 run）
+            for rid, other in list(self.state.runs.items()):
+                if (
+                    other.project_id == run.project_id
+                    and rid != run_id
+                    and other.status in ("running", "queued")
+                ):
+                    self.state.update_run(
+                        rid,
+                        status="failed",
+                        error="被新任务中断",
+                        ended_at=datetime.now().isoformat(timespec="seconds"),
+                    )
+                    self.state.append_run_log(rid, "被新任务中断")
 
-            with project_lock:
+            with nullcontext():
                 self.state.update_run(run_id, status="running")
                 self.state.append_run_log(run_id, "Workflow started")
+                threading.Thread(
+                    target=self._monitor_run_docs, args=(run_id,), daemon=True
+                ).start()
 
                 config_path = self._build_runtime_configs(run, binding)
                 wf_cfg = load_workflow_config(config_path)
@@ -581,28 +756,32 @@ class WebApp:
 
                 result = workflow.run(
                     requirement=run.requirement,
-                    docs_dir=binding.docs_dir,
+                    docs_dir=None,
                     name=run.requirement_name or None,
                     source_file=source_file,
                     skip_clarification=run.skip_clarification,
                     fresh=run.fresh,
                 )
-                self.state.update_run(
-                    run_id,
-                    status="completed",
-                    result=result,
-                    ended_at=datetime.now().isoformat(timespec="seconds"),
-                )
-                self.state.append_run_log(run_id, "Workflow completed")
+                cur = self.state.get_run(run_id)
+                if cur.status not in ("completed", "failed"):
+                    self.state.update_run(
+                        run_id,
+                        status="completed",
+                        result=result,
+                        ended_at=datetime.now().isoformat(timespec="seconds"),
+                    )
+                    self.state.append_run_log(run_id, "Workflow completed")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Workflow run failed")
-            self.state.update_run(
-                run_id,
-                status="failed",
-                error=str(exc),
-                ended_at=datetime.now().isoformat(timespec="seconds"),
-            )
-            self.state.append_run_log(run_id, f"Workflow failed: {exc}")
+            cur = self.state.get_run(run_id)
+            if cur.status not in ("completed", "failed"):
+                self.state.update_run(
+                    run_id,
+                    status="failed",
+                    error=str(exc),
+                    ended_at=datetime.now().isoformat(timespec="seconds"),
+                )
+                self.state.append_run_log(run_id, f"Workflow failed: {exc}")
 
     def start_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         project_id = str(payload.get("project_id") or "").strip()
@@ -632,7 +811,7 @@ class WebApp:
             tool=str(payload.get("tool") or "omp").strip() or "omp",
             skip_clarification=bool(payload.get("skip_clarification", True)),
             fresh=bool(payload.get("fresh", False)),
-            headless_all_nodes=bool(payload.get("headless_all_nodes", True)),
+            headless_all_nodes=True,
             skip_mcp_setup=bool(payload.get("skip_mcp_setup", False)),
             docs_dir=binding.docs_dir,
         )
@@ -716,8 +895,63 @@ class WebApp:
                 )
                 return
 
+
             if len(parts) == 4 and parts[3] == "tasks":
                 self._send_json(handler, HTTPStatus.OK, {"tasks": self.state.list_tasks(project_id)})
+                return
+
+            if len(parts) == 4 and parts[3] == "task-artifacts":
+                name = str((query.get("name") or [""])[0]).strip()
+                binding = self.state.get_binding(project_id)
+                app_root = Path(binding.app_root).resolve()
+                try:
+                    rel, _slug = resolve_requirement_docs_dir(
+                        app_root, binding.docs_dir, "", name=name or None
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._send_json(handler, HTTPStatus.OK, {"node_outputs": {}, "completed_nodes": [], "error": str(exc)})
+                    return
+                docs_abs = (app_root / rel).resolve()
+                no, comp = self._scan_docs_outputs(docs_abs, app_root)
+                self._send_json(
+                    handler,
+                    HTTPStatus.OK,
+                    {
+                        "node_outputs": no,
+                        "completed_nodes": comp,
+                        "docs_dir": str(docs_abs),
+                    },
+                )
+                return
+
+            if len(parts) == 4 and parts[3] == "task-files":
+                name = str((query.get("name") or [""])[0]).strip()
+                binding = self.state.get_binding(project_id)
+                app_root = Path(binding.app_root).resolve()
+                try:
+                    rel, _slug = resolve_requirement_docs_dir(
+                        app_root, binding.docs_dir, "", name=name or None
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._send_json(handler, HTTPStatus.OK, {"files": [], "error": str(exc)})
+                    return
+                docs_abs = (app_root / rel).resolve()
+                files: list[dict[str, str]] = []
+                if docs_abs.is_dir():
+                    for p in sorted(docs_abs.rglob("*")):
+                        if p.is_file():
+                            files.append(
+                                {
+                                    "name": p.name,
+                                    "rel": str(p.relative_to(docs_abs)),
+                                    "abs": str(p.resolve()),
+                                }
+                            )
+                self._send_json(
+                    handler,
+                    HTTPStatus.OK,
+                    {"files": files, "docs_dir": str(docs_abs), "docs_rel": rel},
+                )
                 return
 
         if route == "/api/runs":
@@ -767,10 +1001,14 @@ class WebApp:
                 self._send_json(handler, HTTPStatus.OK, {"project": updated})
                 return
 
-            if len(parts) == 4 and parts[3] == "tasks":
+
+            if len(parts) == 4 and parts[3] == "task-files":
                 payload = self._read_json_body(handler)
-                task = self.state.create_task(project_id, payload)
-                self._send_json(handler, HTTPStatus.CREATED, {"task": task})
+                abs_path = str(payload.get("abs") or "").strip()
+                if not abs_path:
+                    raise ValueError("abs is required")
+                opened = self._reveal_in_finder(Path(abs_path))
+                self._send_json(handler, HTTPStatus.OK, {"opened": opened})
                 return
 
         if route == "/api/runs":
@@ -789,12 +1027,24 @@ class WebApp:
             run = self.state.get_run(run_id)
             outputs = (run.result or {}).get("node_outputs") or {}
             rel = str(outputs.get(node_id) or "").strip()
+            binding = self.state.get_binding(run.project_id)
+            if not rel:
+                # 回退：按任务名扫磁盘产物
+                try:
+                    app_root = Path(binding.app_root).resolve()
+                    docs_rel, _slug = resolve_requirement_docs_dir(
+                        app_root, binding.docs_dir, "", name=run.requirement_name or None
+                    )
+                    docs_abs = (app_root / docs_rel).resolve()
+                    no, _comp = self._scan_docs_outputs(docs_abs, app_root)
+                    rel = str(no.get(node_id) or "").strip()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("回退扫描磁盘产物失败: %s", exc)
+                    rel = ""
             if not rel:
                 raise ValueError(f"No artifact for node: {node_id}")
-
-            binding = self.state.get_binding(run.project_id)
             artifact_path = (Path(binding.app_root) / rel).resolve()
-            opened = self._open_path(artifact_path)
+            opened = self._reveal_in_finder(artifact_path)
             self._send_json(
                 handler,
                 HTTPStatus.OK,
