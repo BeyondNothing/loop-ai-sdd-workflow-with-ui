@@ -811,7 +811,7 @@ class WebApp:
             tool=str(payload.get("tool") or "omp").strip() or "omp",
             skip_clarification=bool(payload.get("skip_clarification", True)),
             fresh=bool(payload.get("fresh", False)),
-            headless_all_nodes=True,
+            headless_all_nodes=bool(payload.get("headless_all_nodes", False)),
             skip_mcp_setup=bool(payload.get("skip_mcp_setup", False)),
             docs_dir=binding.docs_dir,
         )
@@ -984,6 +984,12 @@ class WebApp:
         parts = [segment for segment in route.split("/") if segment]
         if len(parts) >= 3 and parts[0] == "api" and parts[1] == "projects":
             project_id = parts[2]
+
+            if len(parts) == 4 and parts[3] == "tasks":
+                payload = self._read_json_body(handler)
+                task = self.state.create_task(project_id, payload)
+                self._send_json(handler, HTTPStatus.CREATED, {"task": task})
+                return
 
             if len(parts) == 4 and parts[3] == "rules":
                 payload = self._read_json_body(handler)
