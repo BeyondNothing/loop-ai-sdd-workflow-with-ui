@@ -5,7 +5,6 @@ __pycache__/
 *.egg-info/
 *.pyc
 .env
-config/ai-rules.yaml
 .langgraph_api/
 
 # Auto-generated MCP configs (start.sh / run.py → cli_sync)

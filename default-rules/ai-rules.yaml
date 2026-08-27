@@ -38,6 +38,7 @@ nodes:
 
   # 代码实现：只写生产代码（不注入测试规约，避免诱导提前写测试）
   implement_code:
+    - code-rule.md
     - ddd-design-standard.md
     - api-design-standard.md
     - database-standard.md
