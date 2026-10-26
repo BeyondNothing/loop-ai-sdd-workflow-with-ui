@@ -4,7 +4,7 @@ import { message, Modal } from 'ant-design-vue';
 
 import {
   type ProjectBinding,
-  type RuleDirCatalogItem,
+  type RuleSetItem,
   type SystemInfo,
   type TaskItem,
   type WorkflowNodeDef,
@@ -44,7 +44,8 @@ export function useWorkbench() {
   const taskNameInput = ref('');
   const loading = ref(false);
   const systemInfo = ref<SystemInfo | null>(null);
-  const ruleDirs = ref<RuleDirCatalogItem[]>([]);
+  const defaultTool = ref('omp');
+  const ruleSets = ref<RuleSetItem[]>([]);
   const ruleDirPickerOpen = ref(false);
 
   let pollTimer: number | undefined;
@@ -54,10 +55,10 @@ export function useWorkbench() {
   );
 
   const ruleDirOptions = computed(() =>
-    ruleDirs.value.map((d) => ({
-      label: `${d.ai_rules_dir} (${d.projects.length} 项)`,
-      value: d.resolved_path,
-      ai_rules_dir: d.ai_rules_dir,
+    ruleSets.value.map((item) => ({
+      label: `${item.name} (${item.projects.length} 项)`,
+      value: item.resolved_path,
+      ai_rules_dir: item.resolved_path,
     })),
   );
 
@@ -136,12 +137,12 @@ export function useWorkbench() {
     }
   }
 
-  async function loadRuleDirs() {
+  async function loadRuleSets() {
     try {
-      const data = await workflowApi.getRuleDirs();
-      ruleDirs.value = data.rule_dirs || [];
+      const data = await workflowApi.getRuleSets();
+      ruleSets.value = data.rule_sets || data.rule_dirs || [];
     } catch {
-      ruleDirs.value = [];
+      ruleSets.value = [];
     }
   }
 
@@ -228,17 +229,36 @@ export function useWorkbench() {
     projectModalOpen.value = true;
   }
 
+  function findRuleSetForForm() {
+    const root = projectForm.app_root.trim();
+    const rulesPath = projectForm.ai_rules_dir.trim();
+    return ruleSets.value.find((item) => {
+      if (item.resolved_path === rulesPath) return true;
+      if (root && item.resolved_path.startsWith(root)) {
+        const rel = item.resolved_path.slice(root.length).replace(/^[/\\]/, '');
+        return rel === rulesPath;
+      }
+      return false;
+    });
+  }
+
   async function submitProject() {
     const payload = { ...projectForm };
     try {
+      let projectId = selectedProjectId.value;
       if (editingProject.value && selectedProjectId.value) {
         await workflowApi.updateProject(selectedProjectId.value, payload);
       } else {
         const { project } = await workflowApi.createProject(payload);
+        projectId = project.project_id;
         selectedProjectId.value = project.project_id;
       }
+      const matchedRuleSet = findRuleSetForForm();
+      if (matchedRuleSet && projectId) {
+        await workflowApi.bindRuleSet(matchedRuleSet.rule_set_id, [projectId]);
+      }
       projectModalOpen.value = false;
-      await Promise.all([loadProjects(), loadRuleDirs()]);
+      await Promise.all([loadProjects(), loadRuleSets()]);
       message.success('项目已保存');
     } catch (e) {
       message.error(String(e));
@@ -308,7 +328,7 @@ export function useWorkbench() {
         requirement_name: form.taskName,
         requirement: form.requirement,
         requirement_prd_path: form.prdPath,
-        tool: 'omp',
+        tool: defaultTool.value,
         skip_clarification: flags.skipClar,
         auto: flags.auto,
         headless_all_nodes: flags.headless,
@@ -337,7 +357,7 @@ export function useWorkbench() {
   }
 
   function applyRuleDirToProject(resolvedPath: string) {
-    const hit = ruleDirs.value.find((d) => d.resolved_path === resolvedPath);
+    const hit = ruleSets.value.find((d) => d.resolved_path === resolvedPath);
     if (!hit) return;
     const root = projectForm.app_root.trim();
     if (root && hit.resolved_path.startsWith(root)) {
@@ -355,19 +375,24 @@ export function useWorkbench() {
   }
 
   async function refreshAll() {
-    await Promise.all([loadProjects(), loadTasks(), loadRuns(), loadRuleDirs()]);
+    await Promise.all([loadProjects(), loadTasks(), loadRuns(), loadRuleSets()]);
   }
 
   async function loadSystemInfo() {
     try {
-      systemInfo.value = await workflowApi.getSystemInfo();
+      const [info, config] = await Promise.all([
+        workflowApi.getSystemInfo(),
+        workflowApi.getSystemConfig(),
+      ]);
+      systemInfo.value = info;
+      defaultTool.value = config.default_tool || 'omp';
     } catch {
       systemInfo.value = null;
     }
   }
 
   onMounted(async () => {
-    await Promise.all([loadSystemInfo(), loadNodes(), loadProjects(), loadRuleDirs()]);
+    await Promise.all([loadSystemInfo(), loadNodes(), loadProjects(), loadRuleSets()]);
     pollTimer = window.setInterval(loadRuns, 3000);
   });
 

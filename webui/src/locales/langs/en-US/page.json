@@ -15,6 +15,7 @@
   "workflow": {
     "title": "SDD Workbench",
     "workbench": "Task Workbench",
-    "ruleDirs": "Rule Directories"
+    "ruleDirs": "Rule Directories",
+    "settings": "System Settings"
   }
 }

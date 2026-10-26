@@ -9,8 +9,18 @@ const routes: RouteRecordRaw[] = [
     component: () => import('#/views/workflow/rule-dirs/index.vue'),
     meta: {
       icon: 'lucide:book-open',
-      order: -1,
+      order: 1,
       title: $t('page.workflow.ruleDirs'),
+    },
+  },
+  {
+    name: 'WorkflowSettings',
+    path: '/settings',
+    component: () => import('#/views/workflow/settings/index.vue'),
+    meta: {
+      icon: 'lucide:settings',
+      order: 2,
+      title: $t('page.workflow.settings'),
     },
   },
   {

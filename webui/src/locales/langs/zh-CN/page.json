@@ -15,6 +15,7 @@
   "workflow": {
     "title": "SDD 操作台",
     "workbench": "SDD 操作台",
-    "ruleDirs": "规则目录"
+    "ruleDirs": "规则目录",
+    "settings": "系统设置"
   }
 }

@@ -37,7 +37,11 @@ async function handleOk() {
   if (!props.ruleDir) return;
   saving.value = true;
   try {
-    await workflowApi.bindRuleDir(props.ruleDir.resolved_path, checkedIds.value);
+    await workflowApi.bindRuleDir(
+      props.ruleDir.resolved_path,
+      checkedIds.value,
+      props.ruleDir.rule_set_id,
+    );
     message.success('规则目录绑定已更新');
     open.value = false;
     emit('saved');
@@ -72,7 +76,7 @@ function toggleProject(projectId: string, checked: boolean) {
       <div class="mb-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
         <div class="mb-1 flex items-center gap-2 text-sm font-medium">
           <IconifyIcon icon="lucide:book-open" class="opacity-60" />
-          {{ ruleDir.ai_rules_dir }}
+          {{ ruleDir.name || ruleDir.ai_rules_dir }}
         </div>
         <div class="break-all text-xs opacity-50">{{ ruleDir.resolved_path }}</div>
         <div class="mt-2 flex gap-2">

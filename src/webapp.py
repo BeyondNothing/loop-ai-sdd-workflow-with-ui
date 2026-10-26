@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 
+from .agents.registry import DEFAULT_AI_TOOL, list_ai_tools
 from .config_loader import load_workflow_config
 from .mcp import ensure_mcp_for_agents
 from .platform_util import platform_info, platform_label, resolve_prd_path
@@ -36,6 +37,15 @@ NODE_IDS = (
     "verify_tests",
     "ai_review",
 )
+
+
+def _relative_or_absolute_rules_dir(app_root: str, resolved: Path) -> str:
+    app = Path(app_root).expanduser().resolve()
+    target = resolved.expanduser().resolve()
+    try:
+        return str(target.relative_to(app))
+    except ValueError:
+        return str(target)
 
 
 @dataclass
@@ -69,6 +79,40 @@ class ProjectBinding:
             app_root=str(raw["app_root"]),
             docs_dir=str(raw.get("docs_dir") or "docs"),
             ai_rules_dir=str(raw.get("ai_rules_dir") or "ai-rules"),
+            node_rules={
+                str(k): [str(item) for item in (v or [])]
+                for k, v in (raw.get("node_rules") or {}).items()
+            },
+            created_at=str(raw.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+            updated_at=str(raw.get("updated_at") or datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+@dataclass
+class RuleSet:
+    rule_set_id: str
+    name: str
+    folder_path: str
+    node_rules: dict[str, list[str]] = field(default_factory=dict)
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rule_set_id": self.rule_set_id,
+            "name": self.name,
+            "folder_path": self.folder_path,
+            "node_rules": self.node_rules,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "RuleSet":
+        return cls(
+            rule_set_id=str(raw["rule_set_id"]),
+            name=str(raw.get("name") or "").strip() or "规则目录",
+            folder_path=str(raw.get("folder_path") or "").strip(),
             node_rules={
                 str(k): [str(item) for item in (v or [])]
                 for k, v in (raw.get("node_rules") or {}).items()
@@ -159,14 +203,21 @@ class WebState:
         self.bindings_file = self.state_dir / "bindings.json"
         self.tasks_file = self.state_dir / "tasks.json"
         self.runs_file = self.state_dir / "runs.json"
+        self.rule_sets_file = self.state_dir / "rule-sets.json"
+        self.system_config_file = self.state_dir / "system-config.json"
         self.bindings: dict[str, ProjectBinding] = {}
         self.tasks_by_project: dict[str, list[dict[str, Any]]] = {}
         self.runs: dict[str, WorkflowRun] = {}
+        self.rule_sets: dict[str, RuleSet] = {}
+        self.system_config: dict[str, Any] = {"default_tool": DEFAULT_AI_TOOL}
         self.project_run_locks: dict[str, threading.Lock] = {}
         self.lock = threading.Lock()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._load_bindings()
+        self._load_rule_sets()
+        self._load_system_config()
+        self._migrate_rule_sets_from_bindings()
         self._load_tasks()
         self._load_runs()
 
@@ -186,6 +237,302 @@ class WebState:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _normalize_node_rules(raw: dict[str, Any] | None) -> dict[str, list[str]]:
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, list[str]] = {}
+        for node_id, rules in raw.items():
+            if node_id not in NODE_IDS:
+                continue
+            if not isinstance(rules, list):
+                continue
+            cleaned = [str(item).strip() for item in rules if str(item).strip()]
+            if cleaned:
+                normalized[str(node_id)] = cleaned
+        return normalized
+
+    def _resolve_binding_rules_dir(self, binding: ProjectBinding) -> Path:
+        rules_dir = (binding.ai_rules_dir or "ai-rules").strip()
+        path = Path(rules_dir).expanduser()
+        if not path.is_absolute():
+            path = Path(binding.app_root) / path
+        return path.resolve()
+
+    def _load_rule_sets(self) -> None:
+        if not self.rule_sets_file.exists():
+            self.rule_sets = {}
+            return
+        raw = json.loads(self.rule_sets_file.read_text(encoding="utf-8"))
+        self.rule_sets = {
+            item["rule_set_id"]: RuleSet.from_dict(item)
+            for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, dict) and str(item.get("rule_set_id") or "").strip()
+        }
+
+    def _save_rule_sets(self) -> None:
+        payload = [
+            rule_set.to_dict()
+            for rule_set in sorted(
+                self.rule_sets.values(),
+                key=lambda item: item.name.lower(),
+            )
+        ]
+        self.rule_sets_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _migrate_rule_sets_from_bindings(self) -> None:
+        changed = False
+        known_paths = {item.folder_path for item in self.rule_sets.values()}
+        discovered: dict[str, dict[str, Any]] = {}
+
+        for binding in self.bindings.values():
+            try:
+                resolved = str(self._resolve_binding_rules_dir(binding))
+            except (OSError, ValueError):
+                continue
+            if resolved in known_paths or resolved in discovered:
+                continue
+            discovered[resolved] = {
+                "name": Path(resolved).name or "ai-rules",
+                "node_rules": dict(binding.node_rules),
+            }
+
+        for folder_path, meta in discovered.items():
+            now = datetime.now().isoformat(timespec="seconds")
+            rule_set_id = uuid.uuid4().hex[:12]
+            self.rule_sets[rule_set_id] = RuleSet(
+                rule_set_id=rule_set_id,
+                name=str(meta["name"]),
+                folder_path=folder_path,
+                node_rules=self._normalize_node_rules(meta["node_rules"]),
+                created_at=now,
+                updated_at=now,
+            )
+            changed = True
+
+        if changed:
+            self._save_rule_sets()
+
+    def list_rule_sets(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [item.to_dict() for item in self.rule_sets.values()]
+
+    def get_rule_set(self, rule_set_id: str) -> RuleSet:
+        with self.lock:
+            rule_set = self.rule_sets.get(rule_set_id)
+        if rule_set is None:
+            raise KeyError(f"Unknown rule_set_id: {rule_set_id}")
+        return rule_set
+
+    def create_rule_set(
+        self,
+        *,
+        name: str,
+        folder_path: str,
+        node_rules: dict[str, list[str]] | None = None,
+        create_folder: bool = False,
+    ) -> dict[str, Any]:
+        display_name = name.strip()
+        if not display_name:
+            raise ValueError("name is required")
+
+        target = Path(folder_path).expanduser()
+        if not target.is_absolute():
+            target = (self.workflow_root / target).resolve()
+        else:
+            target = target.resolve()
+
+        if create_folder:
+            target.mkdir(parents=True, exist_ok=True)
+        elif not target.is_dir():
+            raise ValueError(f"Rule directory does not exist: {target}")
+
+        resolved = str(target)
+        with self.lock:
+            for existing in self.rule_sets.values():
+                if existing.folder_path == resolved:
+                    raise ValueError(f"Rule directory already registered: {display_name}")
+
+            now = datetime.now().isoformat(timespec="seconds")
+            rule_set_id = uuid.uuid4().hex[:12]
+            rule_set = RuleSet(
+                rule_set_id=rule_set_id,
+                name=display_name,
+                folder_path=resolved,
+                node_rules=self._normalize_node_rules(node_rules or {}),
+                created_at=now,
+                updated_at=now,
+            )
+            self.rule_sets[rule_set_id] = rule_set
+            self._save_rule_sets()
+            return rule_set.to_dict()
+
+    def update_rule_set(
+        self,
+        rule_set_id: str,
+        *,
+        name: str | None = None,
+        folder_path: str | None = None,
+        node_rules: dict[str, list[str]] | None = None,
+        create_folder: bool = False,
+    ) -> dict[str, Any]:
+        with self.lock:
+            rule_set = self.rule_sets.get(rule_set_id)
+            if rule_set is None:
+                raise KeyError(f"Unknown rule_set_id: {rule_set_id}")
+
+            old_path = rule_set.folder_path
+            if name is not None:
+                cleaned = name.strip()
+                if not cleaned:
+                    raise ValueError("name is required")
+                rule_set.name = cleaned
+
+            if folder_path is not None:
+                target = Path(folder_path).expanduser()
+                if not target.is_absolute():
+                    target = (self.workflow_root / target).resolve()
+                else:
+                    target = target.resolve()
+                if create_folder:
+                    target.mkdir(parents=True, exist_ok=True)
+                elif not target.is_dir():
+                    raise ValueError(f"Rule directory does not exist: {target}")
+                resolved = str(target)
+                for existing in self.rule_sets.values():
+                    if existing.rule_set_id != rule_set_id and existing.folder_path == resolved:
+                        raise ValueError("Rule directory already registered")
+                rule_set.folder_path = resolved
+
+            if node_rules is not None:
+                rule_set.node_rules = self._normalize_node_rules(node_rules)
+
+            rule_set.updated_at = datetime.now().isoformat(timespec="seconds")
+            self.rule_sets[rule_set_id] = rule_set
+            self._save_rule_sets()
+
+            if node_rules is not None or folder_path is not None:
+                self._sync_projects_for_rule_set(rule_set, old_path=old_path)
+
+            return rule_set.to_dict()
+
+    def delete_rule_set(self, rule_set_id: str) -> None:
+        with self.lock:
+            if rule_set_id not in self.rule_sets:
+                raise KeyError(f"Unknown rule_set_id: {rule_set_id}")
+            del self.rule_sets[rule_set_id]
+            self._save_rule_sets()
+
+    def _sync_projects_for_rule_set(self, rule_set: RuleSet, *, old_path: str | None = None) -> None:
+        target_path = rule_set.folder_path
+        old_resolved = str(Path(old_path).expanduser().resolve()) if old_path else target_path
+        bindings_changed = False
+
+        for binding in self.bindings.values():
+            try:
+                current = str(self._resolve_binding_rules_dir(binding))
+            except (OSError, ValueError):
+                continue
+            if current not in {target_path, old_resolved}:
+                continue
+            binding.ai_rules_dir = _relative_or_absolute_rules_dir(
+                binding.app_root,
+                Path(target_path),
+            )
+            binding.node_rules = {
+                node_id: list(rules)
+                for node_id, rules in rule_set.node_rules.items()
+            }
+            binding.updated_at = datetime.now().isoformat(timespec="seconds")
+            bindings_changed = True
+
+        if bindings_changed:
+            self._save_bindings()
+
+    def _load_system_config(self) -> None:
+        if not self.system_config_file.exists():
+            self.system_config = {"default_tool": DEFAULT_AI_TOOL}
+            return
+        raw = json.loads(self.system_config_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            self.system_config = {"default_tool": DEFAULT_AI_TOOL}
+            return
+        tool = str(raw.get("default_tool") or DEFAULT_AI_TOOL).strip() or DEFAULT_AI_TOOL
+        self.system_config = {"default_tool": tool}
+
+    def _save_system_config(self) -> None:
+        self.system_config_file.write_text(
+            json.dumps(self.system_config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _system_config_payload(self) -> dict[str, Any]:
+        return {
+            "default_tool": self.system_config.get("default_tool") or DEFAULT_AI_TOOL,
+            "available_tools": list_ai_tools(),
+        }
+
+    def get_system_config(self) -> dict[str, Any]:
+        with self.lock:
+            return self._system_config_payload()
+
+    def update_system_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tool = str(payload.get("default_tool") or DEFAULT_AI_TOOL).strip() or DEFAULT_AI_TOOL
+        valid_ids = {item["id"] for item in list_ai_tools()}
+        if tool not in valid_ids:
+            raise ValueError(f"Unknown default_tool: {tool}")
+
+        with self.lock:
+            self.system_config = {"default_tool": tool}
+            self._save_system_config()
+            return self._system_config_payload()
+
+    def get_default_tool(self) -> str:
+        with self.lock:
+            return str(self.system_config.get("default_tool") or DEFAULT_AI_TOOL)
+
+    def bind_rule_set(self, rule_set_id: str, project_ids: list[str]) -> list[dict[str, Any]]:
+        with self.lock:
+            rule_set = self.rule_sets.get(rule_set_id)
+            if rule_set is None:
+                raise KeyError(f"Unknown rule_set_id: {rule_set_id}")
+
+            target = Path(rule_set.folder_path).expanduser().resolve()
+            if not target.is_dir():
+                raise ValueError(f"Rule directory does not exist: {target}")
+
+            bind_set = {str(item).strip() for item in project_ids if str(item).strip()}
+            updated: list[dict[str, Any]] = []
+
+            for binding in self.bindings.values():
+                try:
+                    current = self._resolve_binding_rules_dir(binding)
+                except (OSError, ValueError):
+                    continue
+
+                if binding.project_id in bind_set:
+                    binding.ai_rules_dir = _relative_or_absolute_rules_dir(
+                        binding.app_root,
+                        target,
+                    )
+                    binding.node_rules = {
+                        node_id: list(rules)
+                        for node_id, rules in rule_set.node_rules.items()
+                    }
+                    binding.updated_at = datetime.now().isoformat(timespec="seconds")
+                    updated.append(binding.to_dict())
+                elif str(current) == str(target) and binding.project_id not in bind_set:
+                    binding.ai_rules_dir = "ai-rules"
+                    binding.node_rules = {}
+                    binding.updated_at = datetime.now().isoformat(timespec="seconds")
+                    updated.append(binding.to_dict())
+
+            self._save_bindings()
+            return updated
 
     def _load_tasks(self) -> None:
         if not self.tasks_file.exists():
@@ -515,85 +862,60 @@ class WebApp:
             )
         return {"dir": str(rules_dir), "files": files, "file_count": len(files)}
 
-    @staticmethod
-    def _relative_or_absolute_rules_dir(app_root: str, resolved: Path) -> str:
-        app = Path(app_root).expanduser().resolve()
-        target = resolved.expanduser().resolve()
-        try:
-            return str(target.relative_to(app))
-        except ValueError:
-            return str(target)
-
-    def _list_rule_dir_catalog(self) -> list[dict[str, Any]]:
-        catalog: dict[str, dict[str, Any]] = {}
-
-        def _ensure(resolved: Path, ai_rules_dir: str) -> dict[str, Any]:
-            key = str(resolved)
-            if key not in catalog:
-                meta = self._rule_files_at_path(resolved)
-                catalog[key] = {
-                    "resolved_path": key,
-                    "ai_rules_dir": ai_rules_dir,
-                    "projects": [],
-                    "file_count": meta["file_count"],
-                    "files": meta["files"][:30],
-                    "exists": resolved.is_dir(),
-                }
-            return catalog[key]
-
+    def _projects_for_rule_path(self, folder_path: str) -> list[dict[str, Any]]:
+        target = str(Path(folder_path).expanduser().resolve())
+        projects: list[dict[str, Any]] = []
         for binding in self.state.bindings.values():
             try:
-                resolved = self._resolve_rules_dir(binding.project_id)
-            except (KeyError, OSError, ValueError):
+                current = str(self.state._resolve_binding_rules_dir(binding))
+            except (OSError, ValueError):
                 continue
-            entry = _ensure(resolved, binding.ai_rules_dir)
-            entry["projects"].append(
-                {
-                    "project_id": binding.project_id,
-                    "name": binding.name,
-                    "ai_rules_dir": binding.ai_rules_dir,
-                },
-            )
+            if current == target:
+                projects.append(
+                    {
+                        "project_id": binding.project_id,
+                        "name": binding.name,
+                        "ai_rules_dir": binding.ai_rules_dir,
+                    },
+                )
+        return projects
 
-        for candidate in (
-            self.workflow_root / "ai-rules",
-            self.workflow_root / "config" / "ai-rules",
-        ):
-            if candidate.is_dir():
-                _ensure(candidate.resolve(), "ai-rules")
+    def _enrich_rule_set(self, rule_set: RuleSet) -> dict[str, Any]:
+        resolved = Path(rule_set.folder_path).expanduser().resolve()
+        meta = self._rule_files_at_path(resolved)
+        payload = rule_set.to_dict()
+        payload.update(
+            {
+                "resolved_path": str(resolved),
+                "ai_rules_dir": rule_set.name,
+                "projects": self._projects_for_rule_path(str(resolved)),
+                "file_count": meta["file_count"],
+                "files": meta["files"],
+                "exists": resolved.is_dir(),
+            },
+        )
+        return payload
 
-        return sorted(catalog.values(), key=lambda item: item["resolved_path"].lower())
+    def _list_rule_sets_catalog(self) -> list[dict[str, Any]]:
+        items = [
+            self._enrich_rule_set(rule_set)
+            for rule_set in self.state.rule_sets.values()
+        ]
+        return sorted(items, key=lambda item: item["name"].lower())
+
+    def _list_rule_dir_catalog(self) -> list[dict[str, Any]]:
+        return self._list_rule_sets_catalog()
 
     def _bind_rule_dir(self, resolved_path: str, project_ids: list[str]) -> list[dict[str, Any]]:
-        target = Path(resolved_path).expanduser().resolve()
-        if not target.is_dir():
-            raise ValueError(f"Rule directory does not exist: {target}")
-
-        bind_set = {str(item).strip() for item in project_ids if str(item).strip()}
-        updated: list[dict[str, Any]] = []
-
-        with self.state.lock:
-            for binding in self.state.bindings.values():
-                try:
-                    current = self._resolve_rules_dir(binding.project_id)
-                except (KeyError, OSError, ValueError):
-                    continue
-
-                if binding.project_id in bind_set:
-                    binding.ai_rules_dir = self._relative_or_absolute_rules_dir(
-                        binding.app_root,
-                        target,
-                    )
-                    binding.updated_at = datetime.now().isoformat(timespec="seconds")
-                    updated.append(binding.to_dict())
-                elif str(current) == str(target) and binding.project_id not in bind_set:
-                    binding.ai_rules_dir = "ai-rules"
-                    binding.updated_at = datetime.now().isoformat(timespec="seconds")
-                    updated.append(binding.to_dict())
-
-            self.state._save_bindings()
-
-        return updated
+        target = str(Path(resolved_path).expanduser().resolve())
+        rule_set_id = ""
+        for rule_set in self.state.rule_sets.values():
+            if rule_set.folder_path == target:
+                rule_set_id = rule_set.rule_set_id
+                break
+        if not rule_set_id:
+            raise ValueError(f"Unknown rule directory: {target}")
+        return self.state.bind_rule_set(rule_set_id, project_ids)
 
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload: dict[str, Any]) -> None:
@@ -793,7 +1115,8 @@ class WebApp:
             requirement=requirement,
             requirement_path=requirement_path,
             requirement_name=str(payload.get("requirement_name") or "").strip(),
-            tool=str(payload.get("tool") or "omp").strip() or "omp",
+            tool=str(payload.get("tool") or self.state.get_default_tool()).strip()
+            or self.state.get_default_tool(),
             skip_clarification=skip_clarification,
             auto=auto,
             fresh=bool(payload.get("fresh", False)),
@@ -890,8 +1213,16 @@ class WebApp:
             self._send_json(handler, HTTPStatus.OK, platform_info())
             return
 
-        if route == "/api/rule-dirs":
-            self._send_json(handler, HTTPStatus.OK, {"rule_dirs": self._list_rule_dir_catalog()})
+        if route == "/api/system/config":
+            self._send_json(handler, HTTPStatus.OK, self.state.get_system_config())
+            return
+
+        if route in ("/api/rule-dirs", "/api/rule-sets"):
+            self._send_json(
+                handler,
+                HTTPStatus.OK,
+                {"rule_dirs": self._list_rule_dir_catalog(), "rule_sets": self._list_rule_sets_catalog()},
+            )
             return
 
         if route == "/api/rule-files":
@@ -991,12 +1322,50 @@ class WebApp:
         if route == "/api/rule-dirs/bind":
             payload = self._read_json_body(handler)
             resolved_path = str(payload.get("resolved_path") or "").strip()
-            if not resolved_path:
-                raise ValueError("resolved_path is required")
+            rule_set_id = str(payload.get("rule_set_id") or "").strip()
             project_ids = payload.get("project_ids") or []
             if not isinstance(project_ids, list):
                 raise ValueError("project_ids must be a list")
-            updated = self._bind_rule_dir(resolved_path, project_ids)
+            if rule_set_id:
+                updated = self.state.bind_rule_set(rule_set_id, project_ids)
+            elif resolved_path:
+                updated = self._bind_rule_dir(resolved_path, project_ids)
+            else:
+                raise ValueError("rule_set_id or resolved_path is required")
+            self._send_json(handler, HTTPStatus.OK, {"projects": updated})
+            return
+
+        if route == "/api/system/config":
+            payload = self._read_json_body(handler)
+            updated = self.state.update_system_config(payload)
+            self._send_json(handler, HTTPStatus.OK, updated)
+            return
+
+        if route == "/api/rule-sets":
+            payload = self._read_json_body(handler)
+            node_rules = payload.get("node_rules") or {}
+            if not isinstance(node_rules, dict):
+                raise ValueError("node_rules must be an object")
+            created = self.state.create_rule_set(
+                name=str(payload.get("name") or "").strip(),
+                folder_path=str(payload.get("folder_path") or "").strip(),
+                node_rules={
+                    str(k): [str(item) for item in (v if isinstance(v, list) else [])]
+                    for k, v in node_rules.items()
+                },
+                create_folder=bool(payload.get("create_folder", False)),
+            )
+            self._send_json(handler, HTTPStatus.CREATED, {"rule_set": created})
+            return
+
+        parts = [segment for segment in route.split("/") if segment]
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "rule-sets" and parts[3] == "bind":
+            rule_set_id = parts[2]
+            payload = self._read_json_body(handler)
+            project_ids = payload.get("project_ids") or []
+            if not isinstance(project_ids, list):
+                raise ValueError("project_ids must be a list")
+            updated = self.state.bind_rule_set(rule_set_id, project_ids)
             self._send_json(handler, HTTPStatus.OK, {"projects": updated})
             return
 
@@ -1094,6 +1463,29 @@ class WebApp:
             self._send_json(handler, HTTPStatus.OK, {"project": updated})
             return
 
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "rule-sets":
+            rule_set_id = parts[2]
+            payload = self._read_json_body(handler)
+            node_rules = payload.get("node_rules")
+            if node_rules is not None and not isinstance(node_rules, dict):
+                raise ValueError("node_rules must be an object")
+            updated = self.state.update_rule_set(
+                rule_set_id,
+                name=str(payload.get("name")).strip() if "name" in payload else None,
+                folder_path=str(payload.get("folder_path")).strip()
+                if "folder_path" in payload
+                else None,
+                node_rules={
+                    str(k): [str(item) for item in (v if isinstance(v, list) else [])]
+                    for k, v in (node_rules or {}).items()
+                }
+                if node_rules is not None
+                else None,
+                create_folder=bool(payload.get("create_folder", False)),
+            )
+            self._send_json(handler, HTTPStatus.OK, {"rule_set": updated})
+            return
+
         self._send_json(handler, HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def handle_delete(self, handler: BaseHTTPRequestHandler) -> None:
@@ -1112,6 +1504,12 @@ class WebApp:
             project_id = parts[2]
             self.state.delete_binding(project_id)
             self._send_json(handler, HTTPStatus.OK, {"deleted": project_id})
+            return
+
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "rule-sets":
+            rule_set_id = parts[2]
+            self.state.delete_rule_set(rule_set_id)
+            self._send_json(handler, HTTPStatus.OK, {"deleted": rule_set_id})
             return
 
         self._send_json(handler, HTTPStatus.NOT_FOUND, {"error": "Not found"})

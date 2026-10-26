@@ -64,17 +64,41 @@ export interface SystemInfo {
   path_sep: string;
 }
 
-export interface RuleDirCatalogItem {
+export interface AiToolOption {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface SystemConfig {
+  default_tool: string;
+  available_tools: AiToolOption[];
+}
+
+export interface RuleSetItem {
+  rule_set_id: string;
+  name: string;
+  folder_path: string;
   resolved_path: string;
   ai_rules_dir: string;
+  node_rules: Record<string, string[]>;
   projects: Array<{ project_id: string; name: string; ai_rules_dir: string }>;
   file_count: number;
   files: string[];
   exists: boolean;
 }
 
+/** @deprecated 使用 RuleSetItem */
+export type RuleDirCatalogItem = RuleSetItem;
+
 export const workflowApi = {
   getSystemInfo: () => rawFetch<SystemInfo>('/api/system/info'),
+  getSystemConfig: () => rawFetch<SystemConfig>('/api/system/config'),
+  updateSystemConfig: (body: { default_tool: string }) =>
+    rawFetch<SystemConfig>('/api/system/config', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   getNodes: () => rawFetch<{ nodes: WorkflowNodeDef[] }>('/api/workflow/nodes'),
   getProjects: () => rawFetch<{ projects: ProjectBinding[] }>('/api/projects'),
   createProject: (body: Record<string, string>) =>
@@ -117,11 +141,48 @@ export const workflowApi = {
       method: 'POST',
       body: JSON.stringify({ node_id: nodeId }),
     }),
-  getRuleDirs: () => rawFetch<{ rule_dirs: RuleDirCatalogItem[] }>('/api/rule-dirs'),
-  bindRuleDir: (resolvedPath: string, projectIds: string[]) =>
+  getRuleSets: () =>
+    rawFetch<{ rule_sets: RuleSetItem[]; rule_dirs: RuleSetItem[] }>('/api/rule-sets'),
+  getRuleDirs: () =>
+    rawFetch<{ rule_sets: RuleSetItem[]; rule_dirs: RuleSetItem[] }>('/api/rule-dirs'),
+  createRuleSet: (body: {
+    name: string;
+    folder_path: string;
+    create_folder?: boolean;
+    node_rules?: Record<string, string[]>;
+  }) =>
+    rawFetch<{ rule_set: RuleSetItem }>('/api/rule-sets', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateRuleSet: (
+    id: string,
+    body: {
+      name?: string;
+      folder_path?: string;
+      create_folder?: boolean;
+      node_rules?: Record<string, string[]>;
+    },
+  ) =>
+    rawFetch<{ rule_set: RuleSetItem }>(`/api/rule-sets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteRuleSet: (id: string) =>
+    rawFetch<{ deleted: string }>(`/api/rule-sets/${id}`, { method: 'DELETE' }),
+  bindRuleSet: (ruleSetId: string, projectIds: string[]) =>
+    rawFetch<{ projects: ProjectBinding[] }>(`/api/rule-sets/${ruleSetId}/bind`, {
+      method: 'POST',
+      body: JSON.stringify({ project_ids: projectIds }),
+    }),
+  bindRuleDir: (resolvedPath: string, projectIds: string[], ruleSetId?: string) =>
     rawFetch<{ projects: ProjectBinding[] }>('/api/rule-dirs/bind', {
       method: 'POST',
-      body: JSON.stringify({ resolved_path: resolvedPath, project_ids: projectIds }),
+      body: JSON.stringify({
+        resolved_path: resolvedPath,
+        rule_set_id: ruleSetId,
+        project_ids: projectIds,
+      }),
     }),
   getRuleFiles: (path: string) =>
     rawFetch<{ dir: string; files: string[]; file_count: number }>(
