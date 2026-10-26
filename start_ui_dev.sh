@@ -16,11 +16,12 @@ fi
 source "$VENV_DIR/bin/activate"
 pip install -e . >/dev/null
 
-(cd webui && npm install)
+export PATH="${HOME}/.local/bin:${PATH}"
+(cd webui && pnpm install)
 
 UI_HOST="${UI_HOST:-127.0.0.1}"
 UI_PORT="${UI_PORT:-8787}"
-VITE_PORT="${VITE_PORT:-5173}"
+VITE_PORT="${VITE_PORT:-5666}"
 
 python serve_ui.py --host "$UI_HOST" --port "$UI_PORT" &
 BACKEND_PID=$!
@@ -32,4 +33,4 @@ trap cleanup EXIT INT TERM
 
 echo "==> 后端 API: http://${UI_HOST}:${UI_PORT}"
 echo "==> 前端开发: http://${UI_HOST}:${VITE_PORT} （Vite 代理 /api）"
-(cd webui && npm run dev -- --host "$UI_HOST" --port "$VITE_PORT")
+(cd webui && pnpm dev --host "$UI_HOST" --port "$VITE_PORT")

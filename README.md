@@ -511,29 +511,34 @@ ai4se-sdd-loop-workflow/            # 本仓库根
 
 ## 13. Web 操作台
 
-基于 Vite + React 的可视化工作台，参考 LocalAI 暗色风格，支持项目/任务管理、工作流执行与节点状态追踪。
+基于 [Vben Admin](https://www.vben.pro)（Vue3 + Ant Design Vue）的可视化工作台，支持项目/任务管理、工作流执行与节点状态追踪。默认免登录，首页直达 `#/workflow/workbench`。
+
+### 前置依赖
+
+- Node.js 20+
+- [pnpm](https://pnpm.io)（`corepack enable` 或安装到 `~/.local/bin`）
 
 ### 生产模式（推荐）
 
 ```bash
 ./start_ui.sh
-# 浏览器打开 http://127.0.0.1:8787
+# 浏览器打开 http://127.0.0.1:8787/#/workbench
 ```
 
-脚本会自动构建 `webui/dist`（若不存在）并由 Python 托管静态资源。
+脚本会自动 `pnpm build` 生成 `webui/dist`（若不存在）并由 Python 托管静态资源。
 
 ### 开发模式
 
 ```bash
 ./start_ui_dev.sh
-# 前端 http://127.0.0.1:5173 （Vite 代理 /api → 8787）
+# 前端 http://127.0.0.1:5666 （Vite 代理 /api → 8787）
 # 后端 http://127.0.0.1:8787
 ```
 
 ### 手动构建
 
 ```bash
-cd webui && npm install && npm run build
+cd webui && pnpm install && pnpm build
 python serve_ui.py --host 127.0.0.1 --port 8787
 ```
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import re
 import shlex
 import shutil
@@ -240,6 +241,9 @@ class OhMyPiTool(AITool):
         if major >= _MIN_NODE_MAJOR:
             node = shutil.which("node")
             return str(Path(node).parent) if node else None
+
+        if sys.platform.startswith("win"):
+            return None
 
         nvm_sh = Path.home() / ".nvm" / "nvm.sh"
         if not nvm_sh.is_file():

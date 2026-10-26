@@ -22,7 +22,8 @@ fi
 
 if [[ ! -d webui/dist ]]; then
   echo "==> 构建前端 (webui/dist)..."
-  (cd webui && npm install && npm run build)
+  export PATH="${HOME}/.local/bin:${PATH}"
+  (cd webui && pnpm install && pnpm build)
 fi
 
 HOST="${UI_HOST:-127.0.0.1}"

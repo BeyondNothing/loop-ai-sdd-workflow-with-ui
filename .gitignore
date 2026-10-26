@@ -1,6 +1,10 @@
 .dev-workflow/
 .idea/
 webui/node_modules/
+webui/**/node_modules/
+webui/.turbo/
+webui/dist/
+webui/dist.zip
 webui/tsconfig.tsbuildinfo
 docs/
 .venv/
@@ -9,6 +13,7 @@ __pycache__/
 *.egg-info/
 *.pyc
 .env
+!webui/.env
 config/ai-rules.yaml
 .langgraph_api/
 

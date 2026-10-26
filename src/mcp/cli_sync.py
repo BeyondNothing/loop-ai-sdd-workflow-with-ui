@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -70,10 +71,16 @@ def _merge_servers(existing: dict[str, Any], servers: dict[str, Any]) -> dict[st
 
 def _resolve_playwright_wrapper(project_root: Path, wrapper: str) -> Path:
     script = (project_root / wrapper).resolve()
-    if os.name == "nt":
+    if os.name == "nt" or sys.platform.startswith("win"):
         win_script = script.with_suffix(".cmd")
         if win_script.exists():
             return win_script
+        if script.suffix.lower() != ".cmd":
+            logger.warning("Windows 环境建议使用 Playwright 脚本: %s", win_script)
+    elif script.suffix.lower() == ".cmd":
+        sh_script = script.with_suffix(".sh")
+        if sh_script.exists():
+            return sh_script
     return script
 
 

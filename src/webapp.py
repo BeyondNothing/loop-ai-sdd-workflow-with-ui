@@ -21,6 +21,7 @@ import yaml
 
 from .config_loader import load_workflow_config
 from .mcp import ensure_mcp_for_agents
+from .platform_util import platform_info, platform_label, resolve_prd_path
 from .workflow import DevWorkflow
 
 logger = logging.getLogger(__name__)
@@ -503,10 +504,96 @@ class WebApp:
 
     def _rule_files(self, project_id: str, ai_rules_dir: str | None = None) -> dict[str, Any]:
         rules_dir = self._resolve_rules_dir(project_id, ai_rules_dir=ai_rules_dir)
+        return self._rule_files_at_path(rules_dir)
+
+    @staticmethod
+    def _rule_files_at_path(rules_dir: Path) -> dict[str, Any]:
         files: list[str] = []
         if rules_dir.exists() and rules_dir.is_dir():
-            files = sorted([str(p.relative_to(rules_dir)) for p in rules_dir.rglob("*.md") if p.is_file()])
-        return {"dir": str(rules_dir), "files": files}
+            files = sorted(
+                [str(p.relative_to(rules_dir)) for p in rules_dir.rglob("*.md") if p.is_file()],
+            )
+        return {"dir": str(rules_dir), "files": files, "file_count": len(files)}
+
+    @staticmethod
+    def _relative_or_absolute_rules_dir(app_root: str, resolved: Path) -> str:
+        app = Path(app_root).expanduser().resolve()
+        target = resolved.expanduser().resolve()
+        try:
+            return str(target.relative_to(app))
+        except ValueError:
+            return str(target)
+
+    def _list_rule_dir_catalog(self) -> list[dict[str, Any]]:
+        catalog: dict[str, dict[str, Any]] = {}
+
+        def _ensure(resolved: Path, ai_rules_dir: str) -> dict[str, Any]:
+            key = str(resolved)
+            if key not in catalog:
+                meta = self._rule_files_at_path(resolved)
+                catalog[key] = {
+                    "resolved_path": key,
+                    "ai_rules_dir": ai_rules_dir,
+                    "projects": [],
+                    "file_count": meta["file_count"],
+                    "files": meta["files"][:30],
+                    "exists": resolved.is_dir(),
+                }
+            return catalog[key]
+
+        for binding in self.state.bindings.values():
+            try:
+                resolved = self._resolve_rules_dir(binding.project_id)
+            except (KeyError, OSError, ValueError):
+                continue
+            entry = _ensure(resolved, binding.ai_rules_dir)
+            entry["projects"].append(
+                {
+                    "project_id": binding.project_id,
+                    "name": binding.name,
+                    "ai_rules_dir": binding.ai_rules_dir,
+                },
+            )
+
+        for candidate in (
+            self.workflow_root / "ai-rules",
+            self.workflow_root / "config" / "ai-rules",
+        ):
+            if candidate.is_dir():
+                _ensure(candidate.resolve(), "ai-rules")
+
+        return sorted(catalog.values(), key=lambda item: item["resolved_path"].lower())
+
+    def _bind_rule_dir(self, resolved_path: str, project_ids: list[str]) -> list[dict[str, Any]]:
+        target = Path(resolved_path).expanduser().resolve()
+        if not target.is_dir():
+            raise ValueError(f"Rule directory does not exist: {target}")
+
+        bind_set = {str(item).strip() for item in project_ids if str(item).strip()}
+        updated: list[dict[str, Any]] = []
+
+        with self.state.lock:
+            for binding in self.state.bindings.values():
+                try:
+                    current = self._resolve_rules_dir(binding.project_id)
+                except (KeyError, OSError, ValueError):
+                    continue
+
+                if binding.project_id in bind_set:
+                    binding.ai_rules_dir = self._relative_or_absolute_rules_dir(
+                        binding.app_root,
+                        target,
+                    )
+                    binding.updated_at = datetime.now().isoformat(timespec="seconds")
+                    updated.append(binding.to_dict())
+                elif str(current) == str(target) and binding.project_id not in bind_set:
+                    binding.ai_rules_dir = "ai-rules"
+                    binding.updated_at = datetime.now().isoformat(timespec="seconds")
+                    updated.append(binding.to_dict())
+
+            self.state._save_bindings()
+
+        return updated
 
     @staticmethod
     def _send_json(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload: dict[str, Any]) -> None:
@@ -622,7 +709,10 @@ class WebApp:
 
             with project_lock:
                 self.state.update_run(run_id, status="running")
-                self.state.append_run_log(run_id, "Workflow started")
+                self.state.append_run_log(
+                    run_id,
+                    f"Workflow started on {platform_label()} ({sys.platform})",
+                )
 
                 config_path = self._build_runtime_configs(run, binding)
                 wf_cfg = load_workflow_config(config_path)
@@ -682,12 +772,11 @@ class WebApp:
         if not requirement and not requirement_path:
             raise ValueError("requirement or requirement_prd_path is required")
         if not requirement and requirement_path:
-            prd = Path(requirement_path)
-            if not prd.is_absolute():
-                prd = Path(binding.app_root) / prd
-            prd = prd.resolve()
+            prd = resolve_prd_path(binding.app_root, requirement_path)
             if not prd.exists():
-                raise ValueError(f"PRD file does not exist: {prd}")
+                raise ValueError(
+                    f"PRD file does not exist on {platform_label()}: {prd}",
+                )
             requirement = prd.read_text(encoding="utf-8")
             requirement_path = str(prd)
 
@@ -797,6 +886,25 @@ class WebApp:
         if self._serve_static_asset(handler, route):
             return
 
+        if route == "/api/system/info":
+            self._send_json(handler, HTTPStatus.OK, platform_info())
+            return
+
+        if route == "/api/rule-dirs":
+            self._send_json(handler, HTTPStatus.OK, {"rule_dirs": self._list_rule_dir_catalog()})
+            return
+
+        if route == "/api/rule-files":
+            target = str((query.get("path") or [""])[0]).strip()
+            if not target:
+                raise ValueError("path is required")
+            self._send_json(
+                handler,
+                HTTPStatus.OK,
+                self._rule_files_at_path(Path(target).expanduser().resolve()),
+            )
+            return
+
         if route == "/api/workflow/nodes":
             self._send_json(handler, HTTPStatus.OK, {"nodes": self._workflow_nodes()})
             return
@@ -869,11 +977,28 @@ class WebApp:
             self._send_json(handler, HTTPStatus.OK, {"run": self._enriched_run_dict(run)})
             return
 
+        # Vue SPA fallback（hash 路由下 /workbench 等路径仍返回 index.html）
+        if not route.startswith("/api/"):
+            self._serve_index(handler)
+            return
+
         self._send_json(handler, HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         parsed = urlparse(handler.path)
         route = parsed.path.rstrip("/") or "/"
+
+        if route == "/api/rule-dirs/bind":
+            payload = self._read_json_body(handler)
+            resolved_path = str(payload.get("resolved_path") or "").strip()
+            if not resolved_path:
+                raise ValueError("resolved_path is required")
+            project_ids = payload.get("project_ids") or []
+            if not isinstance(project_ids, list):
+                raise ValueError("project_ids must be a list")
+            updated = self._bind_rule_dir(resolved_path, project_ids)
+            self._send_json(handler, HTTPStatus.OK, {"projects": updated})
+            return
 
         if route == "/api/projects":
             payload = self._read_json_body(handler)
