@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from src.webapp import serve_web_ui
@@ -16,6 +17,12 @@ def main() -> None:
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.resolve()
+    dist = project_root / "webui" / "dist" / "index.html"
+    if not dist.is_file():
+        print(
+            "提示: 未找到 webui/dist，请先执行: cd webui && npm install && npm run build",
+            file=sys.stderr,
+        )
     serve_web_ui(project_root, host=args.host, port=args.port)
 
 

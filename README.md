@@ -509,7 +509,47 @@ ai4se-sdd-loop-workflow/            # 本仓库根
 
 ---
 
-## 13. 依赖
+## 13. Web 操作台
+
+基于 Vite + React 的可视化工作台，参考 LocalAI 暗色风格，支持项目/任务管理、工作流执行与节点状态追踪。
+
+### 生产模式（推荐）
+
+```bash
+./start_ui.sh
+# 浏览器打开 http://127.0.0.1:8787
+```
+
+脚本会自动构建 `webui/dist`（若不存在）并由 Python 托管静态资源。
+
+### 开发模式
+
+```bash
+./start_ui_dev.sh
+# 前端 http://127.0.0.1:5173 （Vite 代理 /api → 8787）
+# 后端 http://127.0.0.1:8787
+```
+
+### 手动构建
+
+```bash
+cd webui && npm install && npm run build
+python serve_ui.py --host 127.0.0.1 --port 8787
+```
+
+### 状态持久化
+
+操作台数据保存在 `.dev-workflow/web-ui/`：
+
+| 文件 | 内容 |
+|------|------|
+| `bindings.json` | 项目绑定 |
+| `tasks.json` | 任务列表（含 `last_run_id`） |
+| `runs.json` | 工作流运行记录（重启可恢复） |
+
+---
+
+## 14. 依赖
 
 | 包 | 用途 |
 |----|------|

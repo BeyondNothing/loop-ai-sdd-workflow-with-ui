@@ -1,4 +1,8 @@
 .dev-workflow/
+.idea/
+webui/node_modules/
+webui/tsconfig.tsbuildinfo
+docs/
 .venv/
 .venv-test/
 __pycache__/

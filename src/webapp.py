@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import subprocess
 import sys
 import threading
@@ -32,6 +33,7 @@ NODE_IDS = (
     "split_tasks",
     "implement_code",
     "verify_tests",
+    "ai_review",
 )
 
 
@@ -79,12 +81,14 @@ class ProjectBinding:
 class WorkflowRun:
     run_id: str
     project_id: str
+    task_id: str = ""
     status: str = "queued"
     requirement: str = ""
     requirement_path: str = ""
     requirement_name: str = ""
     tool: str = "echo"
     skip_clarification: bool = True
+    auto: bool = False
     fresh: bool = False
     headless_all_nodes: bool = True
     skip_mcp_setup: bool = False
@@ -100,12 +104,14 @@ class WorkflowRun:
         return {
             "run_id": self.run_id,
             "project_id": self.project_id,
+            "task_id": self.task_id,
             "status": self.status,
             "requirement": self.requirement,
             "requirement_path": self.requirement_path,
             "requirement_name": self.requirement_name,
             "tool": self.tool,
             "skip_clarification": self.skip_clarification,
+            "auto": self.auto,
             "fresh": self.fresh,
             "headless_all_nodes": self.headless_all_nodes,
             "skip_mcp_setup": self.skip_mcp_setup,
@@ -118,6 +124,31 @@ class WorkflowRun:
             "logs": self.logs,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "WorkflowRun":
+        return cls(
+            run_id=str(raw["run_id"]),
+            project_id=str(raw["project_id"]),
+            task_id=str(raw.get("task_id") or ""),
+            status=str(raw.get("status") or "queued"),
+            requirement=str(raw.get("requirement") or ""),
+            requirement_path=str(raw.get("requirement_path") or ""),
+            requirement_name=str(raw.get("requirement_name") or ""),
+            tool=str(raw.get("tool") or "echo"),
+            skip_clarification=bool(raw.get("skip_clarification", True)),
+            auto=bool(raw.get("auto", False)),
+            fresh=bool(raw.get("fresh", False)),
+            headless_all_nodes=bool(raw.get("headless_all_nodes", True)),
+            skip_mcp_setup=bool(raw.get("skip_mcp_setup", False)),
+            docs_dir=str(raw.get("docs_dir") or ""),
+            started_at=str(raw.get("started_at") or datetime.now().isoformat(timespec="seconds")),
+            updated_at=str(raw.get("updated_at") or datetime.now().isoformat(timespec="seconds")),
+            ended_at=str(raw.get("ended_at") or ""),
+            result=raw.get("result") if isinstance(raw.get("result"), dict) else None,
+            error=str(raw.get("error") or ""),
+            logs=[str(item) for item in (raw.get("logs") or [])],
+        )
+
 
 class WebState:
     def __init__(self, workflow_root: Path):
@@ -126,14 +157,17 @@ class WebState:
         self.runtime_dir = self.state_dir / "runtime"
         self.bindings_file = self.state_dir / "bindings.json"
         self.tasks_file = self.state_dir / "tasks.json"
+        self.runs_file = self.state_dir / "runs.json"
         self.bindings: dict[str, ProjectBinding] = {}
         self.tasks_by_project: dict[str, list[dict[str, Any]]] = {}
         self.runs: dict[str, WorkflowRun] = {}
+        self.project_run_locks: dict[str, threading.Lock] = {}
         self.lock = threading.Lock()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._load_bindings()
         self._load_tasks()
+        self._load_runs()
 
     def _load_bindings(self) -> None:
         if not self.bindings_file.exists():
@@ -174,6 +208,30 @@ class WebState:
     def _save_tasks(self) -> None:
         self.tasks_file.write_text(
             json.dumps(self.tasks_by_project, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _load_runs(self) -> None:
+        if not self.runs_file.exists():
+            self.runs = {}
+            return
+        raw = json.loads(self.runs_file.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            self.runs = {}
+            return
+        self.runs = {
+            item["run_id"]: WorkflowRun.from_dict(item)
+            for item in raw
+            if isinstance(item, dict) and str(item.get("run_id") or "").strip()
+        }
+
+    def _save_runs(self) -> None:
+        payload = [
+            run.to_dict()
+            for run in sorted(self.runs.values(), key=lambda item: item.started_at)
+        ]
+        self.runs_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -248,6 +306,7 @@ class WebState:
                 del self.runs[run_id]
             self._save_bindings()
             self._save_tasks()
+            self._save_runs()
 
     def get_binding(self, project_id: str) -> ProjectBinding:
         with self.lock:
@@ -292,6 +351,7 @@ class WebState:
                 "task_name": str(payload.get("task_name") or "").strip(),
                 "requirement_prd_path": str(payload.get("requirement_prd_path") or ""),
                 "requirement_text": str(payload.get("requirement_text") or ""),
+                "last_run_id": "",
                 "created_at": now,
                 "updated_at": now,
             }
@@ -340,6 +400,20 @@ class WebState:
             self.tasks_by_project[project_id] = updated
             self._save_tasks()
 
+    def set_task_last_run(self, project_id: str, task_id: str, run_id: str) -> None:
+        with self.lock:
+            tasks = self.tasks_by_project.get(project_id, [])
+            for idx, task in enumerate(tasks):
+                if str(task.get("task_id")) != task_id:
+                    continue
+                updated = dict(task)
+                updated["last_run_id"] = run_id
+                updated["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                tasks[idx] = updated
+                self.tasks_by_project[project_id] = tasks
+                self._save_tasks()
+                return
+
     def list_runs(self) -> list[dict[str, Any]]:
         with self.lock:
             runs = sorted(self.runs.values(), key=lambda item: item.started_at, reverse=True)
@@ -355,6 +429,7 @@ class WebState:
     def create_run(self, run: WorkflowRun) -> None:
         with self.lock:
             self.runs[run.run_id] = run
+            self._save_runs()
 
     def update_run(self, run_id: str, **fields: Any) -> None:
         with self.lock:
@@ -363,6 +438,7 @@ class WebState:
                 setattr(run, key, value)
             run.updated_at = datetime.now().isoformat(timespec="seconds")
             self.runs[run_id] = run
+            self._save_runs()
 
     def append_run_log(self, run_id: str, message: str) -> None:
         stamped = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
@@ -371,13 +447,26 @@ class WebState:
             run.logs.append(stamped)
             run.updated_at = datetime.now().isoformat(timespec="seconds")
             self.runs[run_id] = run
+            self._save_runs()
+
+    def get_project_run_lock(self, project_id: str) -> threading.Lock:
+        """Return a stable per-project lock for run serialization."""
+        with self.lock:
+            lock = self.project_run_locks.get(project_id)
+            if lock is None:
+                lock = threading.Lock()
+                self.project_run_locks[project_id] = lock
+            return lock
 
 
 class WebApp:
     def __init__(self, workflow_root: Path):
         self.workflow_root = workflow_root.resolve()
         self.static_dir = self.workflow_root / "webui"
+        dist_dir = self.static_dir / "dist"
+        self.assets_dir = dist_dir if dist_dir.is_dir() else self.static_dir
         self.state = WebState(self.workflow_root)
+        self._workflow_config_path = self.workflow_root / "config" / "workflow.yaml"
 
     def _runtime_config_dir(self, project_id: str, run_id: str) -> Path:
         path = self.state.runtime_dir / project_id / run_id
@@ -449,6 +538,22 @@ class WebApp:
         handler.wfile.write(body)
 
     @staticmethod
+    def _send_bytes(
+        handler: BaseHTTPRequestHandler,
+        status: HTTPStatus,
+        body: bytes,
+        content_type: str,
+        *,
+        cache_control: str = "public, max-age=3600",
+    ) -> None:
+        handler.send_response(status.value)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Cache-Control", cache_control)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    @staticmethod
     def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         raw_len = int(handler.headers.get("Content-Length", "0") or "0")
         if raw_len <= 0:
@@ -508,41 +613,52 @@ class WebApp:
         try:
             run = self.state.get_run(run_id)
             binding = self.state.get_binding(run.project_id)
-            self.state.update_run(run_id, status="running")
-            self.state.append_run_log(run_id, "Workflow started")
-
-            config_path = self._build_runtime_configs(run, binding)
-            wf_cfg = load_workflow_config(config_path)
-            if not run.skip_mcp_setup and wf_cfg.e2e_enabled:
-                mcp_result = ensure_mcp_for_agents(
-                    self.workflow_root,
-                    e2e_headless=wf_cfg.e2e_headless,
-                )
+            project_lock = self.state.get_project_run_lock(run.project_id)
+            if project_lock.locked():
                 self.state.append_run_log(
                     run_id,
-                    f"MCP configured: servers={mcp_result.get('servers', [])}",
+                    "Another run is active for this project, waiting for project lock",
                 )
 
-            workflow = DevWorkflow(self.workflow_root, config_path)
-            source_file = Path(run.requirement_path) if run.requirement_path else None
-            if source_file and not source_file.exists():
-                source_file = None
+            with project_lock:
+                self.state.update_run(run_id, status="running")
+                self.state.append_run_log(run_id, "Workflow started")
 
-            result = workflow.run(
-                requirement=run.requirement,
-                docs_dir=binding.docs_dir,
-                name=run.requirement_name or None,
-                source_file=source_file,
-                skip_clarification=run.skip_clarification,
-                fresh=run.fresh,
-            )
-            self.state.update_run(
-                run_id,
-                status="completed",
-                result=result,
-                ended_at=datetime.now().isoformat(timespec="seconds"),
-            )
-            self.state.append_run_log(run_id, "Workflow completed")
+                config_path = self._build_runtime_configs(run, binding)
+                wf_cfg = load_workflow_config(config_path)
+                if not run.skip_mcp_setup and wf_cfg.e2e_enabled:
+                    mcp_result = ensure_mcp_for_agents(
+                        self.workflow_root,
+                        e2e_headless=wf_cfg.e2e_headless,
+                    )
+                    self.state.append_run_log(
+                        run_id,
+                        f"MCP configured: servers={mcp_result.get('servers', [])}",
+                    )
+
+                workflow = DevWorkflow(self.workflow_root, config_path)
+                source_file = Path(run.requirement_path) if run.requirement_path else None
+                if source_file and not source_file.exists():
+                    source_file = None
+
+                result = workflow.run(
+                    requirement=run.requirement,
+                    docs_dir=binding.docs_dir,
+                    name=run.requirement_name or None,
+                    source_file=source_file,
+                    skip_clarification=run.skip_clarification,
+                    auto=run.auto,
+                    fresh=run.fresh,
+                )
+                self.state.update_run(
+                    run_id,
+                    status="completed",
+                    result=dict(result),
+                    ended_at=datetime.now().isoformat(timespec="seconds"),
+                )
+                self.state.append_run_log(run_id, "Workflow completed")
+                if run.task_id:
+                    self.state.set_task_last_run(run.project_id, run.task_id, run_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Workflow run failed")
             self.state.update_run(
@@ -552,6 +668,9 @@ class WebApp:
                 ended_at=datetime.now().isoformat(timespec="seconds"),
             )
             self.state.append_run_log(run_id, f"Workflow failed: {exc}")
+            run = self.state.get_run(run_id)
+            if run.task_id:
+                self.state.set_task_last_run(run.project_id, run.task_id, run_id)
 
     def start_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         project_id = str(payload.get("project_id") or "").strip()
@@ -572,26 +691,65 @@ class WebApp:
             requirement = prd.read_text(encoding="utf-8")
             requirement_path = str(prd)
 
+        task_id = str(payload.get("task_id") or "").strip()
+        auto = bool(payload.get("auto", False))
+        skip_clarification = bool(payload.get("skip_clarification", True))
+        if auto:
+            skip_clarification = True
+
         run = WorkflowRun(
             run_id=uuid.uuid4().hex,
             project_id=project_id,
+            task_id=task_id,
             requirement=requirement,
             requirement_path=requirement_path,
             requirement_name=str(payload.get("requirement_name") or "").strip(),
             tool=str(payload.get("tool") or "omp").strip() or "omp",
-            skip_clarification=bool(payload.get("skip_clarification", True)),
+            skip_clarification=skip_clarification,
+            auto=auto,
             fresh=bool(payload.get("fresh", False)),
             headless_all_nodes=bool(payload.get("headless_all_nodes", True)),
             skip_mcp_setup=bool(payload.get("skip_mcp_setup", False)),
             docs_dir=binding.docs_dir,
         )
         self.state.create_run(run)
+        if task_id:
+            self.state.set_task_last_run(project_id, task_id, run.run_id)
         worker = threading.Thread(target=self._run_workflow, args=(run.run_id,), daemon=True)
         worker.start()
-        return run.to_dict()
+        return self._enriched_run_dict(run)
+
+    def _workflow_nodes(self) -> list[dict[str, Any]]:
+        wf_cfg = load_workflow_config(self._workflow_config_path)
+        nodes: list[dict[str, Any]] = []
+        for node_id in NODE_IDS:
+            node_cfg = wf_cfg.nodes.get(node_id)
+            if node_cfg is None:
+                continue
+            nodes.append(
+                {
+                    "id": node_id,
+                    "name": node_cfg.name,
+                    "output": node_cfg.output_file,
+                    "tool": node_cfg.tool,
+                    "mode": node_cfg.mode,
+                }
+            )
+        return nodes
+
+    @staticmethod
+    def _enriched_run_dict(run: WorkflowRun) -> dict[str, Any]:
+        payload = run.to_dict()
+        result = run.result or {}
+        payload["current_node"] = result.get("current_node") or ""
+        payload["completed_nodes"] = result.get("completed_nodes") or []
+        payload["node_outputs"] = result.get("node_outputs") or {}
+        return payload
 
     def _serve_index(self, handler: BaseHTTPRequestHandler) -> None:
-        index_file = self.static_dir / "index.html"
+        index_file = self.assets_dir / "index.html"
+        if not index_file.exists():
+            index_file = self.static_dir / "index.html"
         if not index_file.exists():
             self._send_text(
                 handler,
@@ -606,6 +764,27 @@ class WebApp:
             "text/html; charset=utf-8",
         )
 
+    def _serve_static_asset(self, handler: BaseHTTPRequestHandler, route: str) -> bool:
+        if route.startswith("/api/"):
+            return False
+        rel = route.lstrip("/")
+        if not rel or rel == "index.html":
+            return False
+        asset_path = (self.assets_dir / rel).resolve()
+        if not str(asset_path).startswith(str(self.assets_dir.resolve())):
+            return False
+        if not asset_path.is_file():
+            return False
+        content_type, _ = mimetypes.guess_type(str(asset_path))
+        body = asset_path.read_bytes()
+        self._send_bytes(
+            handler,
+            HTTPStatus.OK,
+            body,
+            content_type or "application/octet-stream",
+        )
+        return True
+
     def handle_get(self, handler: BaseHTTPRequestHandler) -> None:
         parsed = urlparse(handler.path)
         route = parsed.path.rstrip("/") or "/"
@@ -613,6 +792,13 @@ class WebApp:
 
         if route in ("/", "/index.html"):
             self._serve_index(handler)
+            return
+
+        if self._serve_static_asset(handler, route):
+            return
+
+        if route == "/api/workflow/nodes":
+            self._send_json(handler, HTTPStatus.OK, {"nodes": self._workflow_nodes()})
             return
 
         if route == "/api/projects":
@@ -670,13 +856,17 @@ class WebApp:
                 return
 
         if route == "/api/runs":
-            self._send_json(handler, HTTPStatus.OK, {"runs": self.state.list_runs()})
+            runs = [
+                self._enriched_run_dict(self.state.get_run(item["run_id"]))
+                for item in self.state.list_runs()
+            ]
+            self._send_json(handler, HTTPStatus.OK, {"runs": runs})
             return
 
         if route.startswith("/api/runs/"):
             run_id = route.split("/")[3]
             run = self.state.get_run(run_id)
-            self._send_json(handler, HTTPStatus.OK, {"run": run.to_dict()})
+            self._send_json(handler, HTTPStatus.OK, {"run": self._enriched_run_dict(run)})
             return
 
         self._send_json(handler, HTTPStatus.NOT_FOUND, {"error": "Not found"})
