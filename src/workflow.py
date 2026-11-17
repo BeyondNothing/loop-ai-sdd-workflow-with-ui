@@ -1,7 +1,6 @@
 """LangGraph workflow 编排 — 节点与边在代码中固定定义。"""
 
 import logging
-import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -9,14 +8,11 @@ from langgraph.graph import END, StateGraph
 
 from .config_loader import load_workflow_config
 from .nodes.node_runner import NodeRunner
-from .parsers.clarification_parser import parse_clarification_checklist
-from .parsers.requirement_parser import parse_requirement_metadata
 from .phase_gate import (
     plan_and_tests_content_ready,
     phase_complete,
     requirements_complete,
-    resolve_draft_path,
-    review_plan_tests_complete,
+    review_plan_complete,
 )
 from .requirement_dir import (
     resolve_app_root,
@@ -46,50 +42,7 @@ class DevWorkflow:
         return {"current_node": "route_next"}
 
     def analyze_requirements(self, state: DevWorkflowState) -> DevWorkflowState:
-        docs_dir = self._resolve_docs_path(state)
-        if state.get("skip_clarification"):
-            promoted = self._try_promote_draft_without_clarification(state, docs_dir)
-            if promoted is not None:
-                return promoted
         return self.node_runner.run_node("analyze_requirements", state)
-
-    def _try_promote_draft_without_clarification(
-        self, state: DevWorkflowState, docs_dir: Path
-    ) -> DevWorkflowState | None:
-        draft_path_resolved = resolve_draft_path(docs_dir, "01-requirements.draft.md")
-        final_path = docs_dir / "01-requirements.md"
-        if not draft_path_resolved.exists() or final_path.exists():
-            return None
-
-        checklist = parse_clarification_checklist(
-            draft_path_resolved.read_text(encoding="utf-8")
-        )
-        if checklist.pending_items():
-            return None
-
-        shutil.copyfile(draft_path_resolved, final_path)
-        metadata = parse_requirement_metadata(final_path.read_text(encoding="utf-8"))
-        if not metadata.requirement_type or metadata.requirement_type == "unknown":
-            metadata = parse_requirement_metadata(
-                draft_path_resolved.read_text(encoding="utf-8")
-            )
-
-        logger.info("跳过澄清且无 pending，已将初稿提升为定稿: %s", final_path)
-        app_root = self._resolve_app_root(state)
-        updates: DevWorkflowState = {
-            "node_outputs": {
-                "analyze_requirements": str(final_path.relative_to(app_root)),
-            },
-            "clarification_resolved": True,
-            "clarification_pending_count": 0,
-        }
-        updates.update(metadata.to_state_updates())
-        updates.update(checklist.to_state())
-        merged = {**state, **updates}
-        self.node_runner.write_workflow_status_for_file(
-            docs_dir, "01-requirements.md", "analyze_requirements", merged
-        )
-        return updates
 
     def parallel_plan_and_tests(self, state: DevWorkflowState) -> DevWorkflowState:
         """并行 headless：create_plan + design_test_cases（线程池，完成后进入 review）。"""
@@ -138,8 +91,8 @@ class DevWorkflow:
                 result[key] = value
         return result
 
-    def review_plan_and_tests(self, state: DevWorkflowState) -> DevWorkflowState:
-        return self.node_runner.run_node("review_plan_and_tests", state)
+    def review_plan(self, state: DevWorkflowState) -> DevWorkflowState:
+        return self.node_runner.run_node("review_plan", state)
 
     def create_plan(self, state: DevWorkflowState) -> DevWorkflowState:
         return self.node_runner.run_node("create_plan", state)
@@ -156,6 +109,9 @@ class DevWorkflow:
     def ai_review(self, state: DevWorkflowState) -> DevWorkflowState:
         return self.node_runner.run_node("ai_review", state)
 
+    def commit_code(self, state: DevWorkflowState) -> DevWorkflowState:
+        return self.node_runner.run_node("commit_code", state)
+
     def _route_from_start(self, state: DevWorkflowState) -> str:
         return state.get("resume_from_node") or "analyze_requirements"
 
@@ -168,12 +124,12 @@ class DevWorkflow:
     def _route_after_parallel(self, state: DevWorkflowState) -> str:
         docs_dir = self._resolve_docs_path(state)
         if plan_and_tests_content_ready(docs_dir, state):
-            return "review_plan_and_tests"
+            return "review_plan"
         return END
 
     def _route_after_review(self, state: DevWorkflowState) -> str:
         docs_dir = self._resolve_docs_path(state)
-        if review_plan_tests_complete(docs_dir, state):
+        if review_plan_complete(docs_dir, state):
             return "split_tasks"
         return END
 
@@ -198,12 +154,13 @@ class DevWorkflow:
         workflow.add_node("route_next", self.route_next)
         workflow.add_node("analyze_requirements", self.analyze_requirements)
         workflow.add_node("parallel_plan_and_tests", self.parallel_plan_and_tests)
-        workflow.add_node("review_plan_and_tests", self.review_plan_and_tests)
+        workflow.add_node("review_plan", self.review_plan)
         workflow.add_node("create_plan", self.create_plan)
         workflow.add_node("split_tasks", self.split_tasks)
         workflow.add_node("implement_code", self.implement_code)
         workflow.add_node("verify_tests", self.verify_tests)
         workflow.add_node("ai_review", self.ai_review)
+        workflow.add_node("commit_code", self.commit_code)
 
         workflow.set_entry_point("route_next")
         workflow.add_conditional_edges(
@@ -212,12 +169,13 @@ class DevWorkflow:
             {
                 "analyze_requirements": "analyze_requirements",
                 "parallel_plan_and_tests": "parallel_plan_and_tests",
-                "review_plan_and_tests": "review_plan_and_tests",
+                "review_plan": "review_plan",
                 "create_plan": "create_plan",
                 "split_tasks": "split_tasks",
                 "implement_code": "implement_code",
                 "verify_tests": "verify_tests",
                 "ai_review": "ai_review",
+                "commit_code": "commit_code",
             },
         )
         workflow.add_conditional_edges(
@@ -232,12 +190,12 @@ class DevWorkflow:
             "parallel_plan_and_tests",
             self._route_after_parallel,
             {
-                "review_plan_and_tests": "review_plan_and_tests",
+                "review_plan": "review_plan",
                 END: END,
             },
         )
         workflow.add_conditional_edges(
-            "review_plan_and_tests",
+            "review_plan",
             self._route_after_review,
             {
                 "split_tasks": "split_tasks",
@@ -254,7 +212,8 @@ class DevWorkflow:
         )
         workflow.add_edge("implement_code", "verify_tests")
         workflow.add_edge("verify_tests", "ai_review")
-        workflow.add_edge("ai_review", END)
+        workflow.add_edge("ai_review", "commit_code")
+        workflow.add_edge("commit_code", END)
 
         return workflow.compile()
 
@@ -292,15 +251,11 @@ class DevWorkflow:
             for path in docs_path.glob("*.md"):
                 if path.name != "00-requirement.md":
                     path.unlink()
-            draft_subdir = docs_path / "draft"
-            if draft_subdir.is_dir():
-                for path in draft_subdir.glob("*.md"):
-                    path.unlink()
 
         original_path = save_original_requirement(docs_path, requirement)
 
         if is_workflow_complete(docs_path):
-            logger.info("Workflow 已完成（06-ai-review.md status=completed）")
+            logger.info("Workflow 已完成（07-commit.md status=completed）")
             done_state: DevWorkflowState = {
                 "requirement": requirement,
                 "app_root": str(app_root),
@@ -338,6 +293,9 @@ class DevWorkflow:
             "change_scope": "",
             "affected_modules": [],
             "compatibility_risk": "",
+            "delivery_role": "unknown",
+            "delivery_blocks": [],
+            "role_basis": "",
             "requirement_metadata": {},
             "clarification_questions": [],
             "clarification_resolved": False,
@@ -349,7 +307,7 @@ class DevWorkflow:
             "requirement_approved": False,
             "plan_approved": False,
             "test_cases_approved": False,
-            "review_plan_tests_approved": False,
+            "review_plan_approved": False,
             "tasks_approved": False,
             "test_passed": False,
             "last_error": None,

@@ -13,15 +13,13 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import re
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 from .base import AITool, AIToolResult, CompletionCheck
-from .interactive_runner import run_interactive_subprocess
+from .interactive_runner import log_launch_command, run_interactive_subprocess
 from .prompt_file import launch_read_prompt, save_node_prompt
 
 logger = logging.getLogger(__name__)
@@ -41,6 +39,7 @@ class OhMyPiTool(AITool):
         *,
         node_id: str | None = None,
         prompt_dir: str | Path | None = None,
+        model: str | None = None,
     ) -> AIToolResult:
         prompt_file = save_node_prompt(
             prompt, cwd, node_id=node_id, prompt_dir=prompt_dir
@@ -54,8 +53,10 @@ class OhMyPiTool(AITool):
                 message=f"Oh My Pi CLI (omp) 不可用，prompt 已保存至 {prompt_file}",
             )
 
-        cmd = self._build_cmd(binary, prompt_file, headless=True, cwd=cwd)
-        self._log_launch_cmd(cmd)
+        cmd = self._build_cmd(
+            binary, prompt_file, headless=True, cwd=cwd, model=model
+        )
+        self._log_launch_cmd(cmd, cwd)
         try:
             logger.info("调用 Oh My Pi CLI (headless): %s", binary)
             proc = subprocess.run(
@@ -100,6 +101,7 @@ class OhMyPiTool(AITool):
         completion_check: CompletionCheck | None = None,
         node_id: str | None = None,
         prompt_dir: str | Path | None = None,
+        model: str | None = None,
     ) -> AIToolResult:
         prompt_file = save_node_prompt(
             prompt, cwd, node_id=node_id, prompt_dir=prompt_dir
@@ -113,8 +115,9 @@ class OhMyPiTool(AITool):
                 message=f"Oh My Pi CLI (omp) 不可用，prompt 已保存至 {prompt_file}",
             )
 
-        cmd = self._build_cmd(binary, prompt_file, headless=False, cwd=cwd)
-        self._log_launch_cmd(cmd)
+        cmd = self._build_cmd(
+            binary, prompt_file, headless=False, cwd=cwd, model=model
+        )
         try:
             logger.info("交互调用 Oh My Pi CLI: %s", binary)
             return run_interactive_subprocess(
@@ -142,6 +145,7 @@ class OhMyPiTool(AITool):
         *,
         headless: bool,
         cwd: str,
+        model: str | None = None,
     ) -> list[str]:
         cmd: list[str] = [binary]
         project_root = cls._resolve_omp_project_root(cwd)
@@ -164,27 +168,17 @@ class OhMyPiTool(AITool):
             )
         else:
             cmd.append("--auto-approve")
+        cmd.extend(cls.model_cli_flags(model))
         cmd.append(cls._launch_prompt(prompt_file))
         return cmd
 
     @staticmethod
     def _launch_prompt(prompt_file: Path) -> str:
-        return launch_read_prompt(
-            prompt_file,
-            extra=(
-                "Before any E2E or Playwright work: run `/mcp list` and confirm the "
-                "playwright server is ready. Call tools as mcp__playwright_browser_* "
-                "(e.g. mcp__playwright_browser_navigate), NOT browser_*. "
-                "Do NOT treat empty ListMcpResources, missing browser_* names, or "
-                "Unknown tool on browser_navigate as MCP unavailable."
-            ),
-        )
+        return launch_read_prompt(prompt_file)
 
     @staticmethod
-    def _log_launch_cmd(cmd: list[str]) -> None:
-        rendered = " ".join(shlex.quote(part) for part in cmd)
-        logger.info("Oh My Pi 启动命令: %s", rendered)
-        print(f"[omp] 启动命令:\n  {rendered}\n", flush=True)
+    def _log_launch_cmd(cmd: list[str], cwd: str = ".") -> None:
+        log_launch_command(cmd, cwd, label="omp")
 
     @classmethod
     def _resolve_omp_project_root(cls, cwd: str) -> Path | None:
@@ -241,9 +235,6 @@ class OhMyPiTool(AITool):
         if major >= _MIN_NODE_MAJOR:
             node = shutil.which("node")
             return str(Path(node).parent) if node else None
-
-        if sys.platform.startswith("win"):
-            return None
 
         nvm_sh = Path.home() / ".nvm" / "nvm.sh"
         if not nvm_sh.is_file():

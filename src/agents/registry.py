@@ -2,6 +2,7 @@
 
 from .base import AITool
 from .claude_code_agent import ClaudeCodeTool
+from .codex_agent import CodexTool
 from .cursor_agent import CursorTool
 from .echo_agent import EchoTool
 from .oh_my_pi_agent import OhMyPiTool
@@ -11,6 +12,7 @@ _OH_MY_PI = OhMyPiTool()
 _TOOLS: dict[str, AITool] = {
     "cursor": CursorTool(),
     "claude_code": ClaudeCodeTool(),
+    "codex": CodexTool(),
     "echo": EchoTool(),
     "oh_my_pi": _OH_MY_PI,
     "omp": _OH_MY_PI,
@@ -42,6 +44,11 @@ def list_ai_tools() -> list[dict[str, str]]:
             "id": "claude_code",
             "name": "Claude Code",
             "description": "Claude Code CLI（claude / claude-code）",
+        },
+        {
+            "id": "codex",
+            "name": "Codex",
+            "description": "OpenAI Codex CLI",
         },
         {
             "id": "echo",

@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 
 import { message, Modal } from 'ant-design-vue';
 
@@ -6,6 +6,7 @@ import {
   type ProjectBinding,
   type RuleSetItem,
   type SystemInfo,
+  type TaskInsights,
   type TaskItem,
   type WorkflowNodeDef,
   type WorkflowRun,
@@ -47,6 +48,8 @@ export function useWorkbench() {
   const defaultTool = ref('omp');
   const ruleSets = ref<RuleSetItem[]>([]);
   const ruleDirPickerOpen = ref(false);
+  const taskInsights = ref<TaskInsights | null>(null);
+  const taskQaStatus = ref<Record<string, string>>({});
 
   let pollTimer: number | undefined;
 
@@ -161,7 +164,16 @@ export function useWorkbench() {
     syncSelectedRun();
   }
 
-  function syncSelectedRun() {
+  function syncSelectedRun(preferLastRun = false) {
+    // 轮询刷新：优先保留用户已点「查看」的同一条 run，只更新对象内容
+    if (!preferLastRun && selectedRun.value?.run_id) {
+      const current = runs.value.find((r) => r.run_id === selectedRun.value!.run_id);
+      if (current) {
+        selectedRun.value = current;
+        return;
+      }
+    }
+
     const task = tasks.value.find((t) => t.task_id === selectedTaskId.value);
     if (task?.last_run_id) {
       const hit = runs.value.find((r) => r.run_id === task.last_run_id);
@@ -187,30 +199,125 @@ export function useWorkbench() {
     return run?.status || '';
   }
 
+  function qaBadge(taskId: string) {
+    return taskQaStatus.value[taskId] || '';
+  }
+
+  async function loadTaskInsights(taskId = selectedTaskId.value) {
+    if (!selectedProjectId.value || !taskId) {
+      taskInsights.value = null;
+      return;
+    }
+    try {
+      const data = await workflowApi.getTaskInsights(selectedProjectId.value, taskId);
+      taskInsights.value = data;
+      taskQaStatus.value = {
+        ...taskQaStatus.value,
+        [taskId]: data.qa_review?.status || '',
+      };
+    } catch {
+      taskInsights.value = null;
+    }
+  }
+
+  async function loadTaskQaBadges() {
+    if (!selectedProjectId.value || !tasks.value.length) {
+      taskQaStatus.value = {};
+      return;
+    }
+    const projectId = selectedProjectId.value;
+    const entries = await Promise.all(
+      tasks.value.slice(0, 30).map(async (task) => {
+        try {
+          const data = await workflowApi.getTaskInsights(projectId, task.task_id);
+          return [task.task_id, data.qa_review?.status || ''] as const;
+        } catch {
+          return [task.task_id, ''] as const;
+        }
+      }),
+    );
+    const next: Record<string, string> = {};
+    for (const [id, status] of entries) next[id] = status;
+    taskQaStatus.value = next;
+  }
+
+  async function approveQa(status = 'approved', userNote = '') {
+    if (!selectedProjectId.value || !selectedTaskId.value) return;
+    loading.value = true;
+    try {
+      const data = await workflowApi.approveTaskQa(
+        selectedProjectId.value,
+        selectedTaskId.value,
+        { status, user_note: userNote },
+      );
+      taskInsights.value = data.insights;
+      taskQaStatus.value = {
+        ...taskQaStatus.value,
+        [selectedTaskId.value]: data.insights.qa_review?.status || status,
+      };
+      message.success(status === 'approved' ? '已标记用例 QA 通过（异步，不阻塞主流程）' : '已重置为待审');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      loading.value = false;
+    }
+  }
+
   async function selectProject(projectId: string) {
     selectedProjectId.value = projectId;
     selectedTaskId.value = '';
     selectedRun.value = null;
+    taskInsights.value = null;
     form.taskName = '';
     form.prdPath = '';
     form.requirement = '';
     await loadTasks();
     await loadRuns();
+    await loadTaskQaBadges();
   }
 
-  function selectTask(taskId: string) {
+  async function selectTask(taskId: string) {
     selectedTaskId.value = taskId;
     const task = tasks.value.find((t) => t.task_id === taskId);
     if (!task) return;
     form.taskName = task.task_name;
     form.prdPath = task.requirement_prd_path;
     form.requirement = task.requirement_text;
-    syncSelectedRun();
+    syncSelectedRun(true);
+    await loadTaskInsights(taskId);
+  }
+
+  async function viewRun(runId: string) {
+    const hit = runs.value.find((r) => r.run_id === runId);
+    if (!hit) {
+      message.warning('找不到该执行记录');
+      return false;
+    }
+    selectedRun.value = hit;
+
+    // 联动左侧任务，但不覆盖刚选中的 run
+    const matched =
+      (hit.task_id && tasks.value.find((t) => t.task_id === hit.task_id)) ||
+      tasks.value.find(
+        (t) =>
+          t.task_name === hit.requirement_name &&
+          (!hit.project_id || selectedProjectId.value === hit.project_id),
+      );
+
+    if (matched) {
+      selectedTaskId.value = matched.task_id;
+      form.taskName = matched.task_name;
+      form.prdPath = matched.requirement_prd_path;
+      form.requirement = matched.requirement_text;
+      await loadTaskInsights(matched.task_id);
+    } else if (hit.requirement_name) {
+      form.taskName = hit.requirement_name;
+    }
+    return true;
   }
 
   function selectRun(runId: string) {
-    const hit = runs.value.find((r) => r.run_id === runId);
-    if (hit) selectedRun.value = hit;
+    void viewRun(runId);
   }
 
   function openProjectModal(edit = false) {
@@ -376,6 +483,7 @@ export function useWorkbench() {
 
   async function refreshAll() {
     await Promise.all([loadProjects(), loadTasks(), loadRuns(), loadRuleSets()]);
+    await Promise.all([loadTaskQaBadges(), loadTaskInsights()]);
   }
 
   async function loadSystemInfo() {
@@ -393,16 +501,18 @@ export function useWorkbench() {
 
   onMounted(async () => {
     await Promise.all([loadSystemInfo(), loadNodes(), loadProjects(), loadRuleSets()]);
-    pollTimer = window.setInterval(loadRuns, 3000);
+    pollTimer = window.setInterval(async () => {
+      await loadRuns();
+      if (selectedTaskId.value) await loadTaskInsights();
+    }, 3000);
   });
 
   onUnmounted(() => {
     if (pollTimer) window.clearInterval(pollTimer);
   });
 
-  watch(selectedTaskId, () => syncSelectedRun());
-
   return {
+    approveQa,
     currentStepIndex,
     deleteProject,
     deleteTask,
@@ -410,6 +520,7 @@ export function useWorkbench() {
     flags,
     form,
     loading,
+    loadTaskInsights,
     nodeStatuses,
     openArtifact,
     applyRuleDirToProject,
@@ -419,6 +530,7 @@ export function useWorkbench() {
     projectModalOpen,
     projectRuns,
     projects,
+    qaBadge,
     refreshAll,
     ruleDirOptions,
     ruleDirPickerOpen,
@@ -430,11 +542,13 @@ export function useWorkbench() {
     selectProject,
     selectRun,
     selectTask,
+    viewRun,
     startRun,
     statusColor,
     systemInfo,
     submitProject,
     submitTask,
+    taskInsights,
     taskModalOpen,
     taskNameInput,
     taskRunStatus,

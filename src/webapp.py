@@ -19,10 +19,13 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 
+from .agents import interactive_runner
 from .agents.registry import DEFAULT_AI_TOOL, list_ai_tools
 from .config_loader import load_workflow_config
 from .mcp import ensure_mcp_for_agents
 from .platform_util import platform_info, platform_label, resolve_prd_path
+from . import settings_service
+from .artifact_insights import build_task_insights, set_test_cases_approval
 from .workflow import DevWorkflow
 
 logger = logging.getLogger(__name__)
@@ -31,11 +34,12 @@ NODE_IDS = (
     "analyze_requirements",
     "create_plan",
     "design_test_cases",
-    "review_plan_and_tests",
+    "review_plan",
     "split_tasks",
     "implement_code",
     "verify_tests",
     "ai_review",
+    "commit_code",
 )
 
 
@@ -862,6 +866,61 @@ class WebApp:
             )
         return {"dir": str(rules_dir), "files": files, "file_count": len(files)}
 
+    def _task_insights(self, project_id: str, task_id: str) -> dict[str, Any]:
+        binding = self.state.get_binding(project_id)
+        task = next(
+            (item for item in self.state.list_tasks(project_id) if item.get("task_id") == task_id),
+            None,
+        )
+        if task is None:
+            raise KeyError(f"Unknown task_id: {task_id}")
+
+        run_docs_dir: str | None = None
+        last_run_id = str(task.get("last_run_id") or "").strip()
+        if last_run_id:
+            try:
+                run = self.state.get_run(last_run_id)
+                result = run.result or {}
+                if result.get("docs_dir"):
+                    run_docs_dir = str(result.get("docs_dir") or "").strip() or None
+            except KeyError:
+                run_docs_dir = None
+
+        insights = build_task_insights(
+            binding.app_root,
+            docs_base=binding.docs_dir or "docs",
+            task_name=str(task.get("task_name") or ""),
+            run_docs_dir=run_docs_dir,
+        )
+        insights["project_id"] = project_id
+        insights["task_id"] = task_id
+        insights["task_name"] = task.get("task_name") or ""
+        return insights
+
+    def _rule_set_system_md(self, rule_set_id: str) -> dict[str, Any]:
+        rule_set = self.state.get_rule_set(rule_set_id)
+        path = Path(rule_set.folder_path).expanduser().resolve() / "system.md"
+        content = path.read_text(encoding="utf-8") if path.is_file() else ""
+        return {
+            "rule_set_id": rule_set_id,
+            "path": str(path),
+            "exists": path.is_file(),
+            "content": content,
+        }
+
+    def _save_rule_set_system_md(self, rule_set_id: str, content: str) -> dict[str, Any]:
+        rule_set = self.state.get_rule_set(rule_set_id)
+        folder = Path(rule_set.folder_path).expanduser().resolve()
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "system.md"
+        path.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
+        return {
+            "rule_set_id": rule_set_id,
+            "path": str(path),
+            "exists": True,
+            "content": path.read_text(encoding="utf-8"),
+        }
+
     def _projects_for_rule_path(self, folder_path: str) -> list[dict[str, Any]]:
         target = str(Path(folder_path).expanduser().resolve())
         projects: list[dict[str, Any]] = []
@@ -983,37 +1042,133 @@ class WebApp:
             subprocess.Popen(["xdg-open", str(target)])
         return str(target)
 
+    def _sync_app_sdd_config(self, binding: ProjectBinding) -> Path:
+        """把操作台绑定的规则写入业务根 sdd-loop-workflow-config/（与引擎 loader 对齐）。"""
+        from .config_loader import (
+            AI_RULES_CONFIG_FILENAME,
+            APP_CONFIG_DIR_NAME,
+            APP_WORKFLOW_CONFIG_FILENAME,
+            DEFAULT_AI_RULES_SUBDIR,
+        )
+
+        app_root = Path(binding.app_root).expanduser().resolve()
+        config_dir = app_root / APP_CONFIG_DIR_NAME
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        # 首次可从引擎模板拷贝 suggestion-confidence / 示例规则
+        template_dir = self.workflow_root / "config" / APP_CONFIG_DIR_NAME
+        if template_dir.is_dir():
+            for name in (
+                "suggestion-confidence-rules.yaml",
+                "ai-rules.yaml",
+                APP_WORKFLOW_CONFIG_FILENAME,
+            ):
+                src = template_dir / name
+                dst = config_dir / name
+                if src.is_file() and not dst.is_file():
+                    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            template_rules = template_dir / DEFAULT_AI_RULES_SUBDIR
+            rules_dst = config_dir / DEFAULT_AI_RULES_SUBDIR
+            if template_rules.is_dir() and not rules_dst.exists():
+                import shutil
+
+                shutil.copytree(template_rules, rules_dst)
+
+        # 规则目录：绝对路径保留；相对路径相对 sdd-loop-workflow-config/
+        rules_path = Path(binding.ai_rules_dir).expanduser()
+        if rules_path.is_absolute():
+            ai_rules_dir = str(rules_path.resolve())
+        else:
+            # 兼容旧绑定 ai-rules（相对 app_root）→ 优先落在 config 下
+            under_config = config_dir / binding.ai_rules_dir
+            under_app = app_root / binding.ai_rules_dir
+            if under_config.is_dir() or not under_app.is_dir():
+                ai_rules_dir = binding.ai_rules_dir.strip() or DEFAULT_AI_RULES_SUBDIR
+            else:
+                ai_rules_dir = str(under_app.resolve())
+
+        nodes_payload: dict[str, list[str]] = {}
+        for node_id, rules in (binding.node_rules or {}).items():
+            cleaned = [str(item).strip() for item in rules if str(item).strip()]
+            if cleaned:
+                nodes_payload[str(node_id)] = cleaned
+
+        rules_yaml = {
+            "ai_rules_dir": ai_rules_dir,
+            "nodes": nodes_payload,
+        }
+        (config_dir / AI_RULES_CONFIG_FILENAME).write_text(
+            yaml.safe_dump(rules_yaml, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        workflow_overlay = {
+            "docs_dir": binding.docs_dir or "spec",
+            "defaults": {"tool": "omp"},
+        }
+        overlay_path = config_dir / APP_WORKFLOW_CONFIG_FILENAME
+        if overlay_path.is_file():
+            existing = yaml.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
+            if isinstance(existing, dict):
+                existing["docs_dir"] = binding.docs_dir or existing.get("docs_dir") or "spec"
+                overlay_path.write_text(
+                    yaml.safe_dump(existing, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+            else:
+                overlay_path.write_text(
+                    yaml.safe_dump(workflow_overlay, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+        else:
+            overlay_path.write_text(
+                yaml.safe_dump(workflow_overlay, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        return config_dir
+
     def _build_runtime_configs(self, run: WorkflowRun, binding: ProjectBinding) -> Path:
         runtime_dir = self._runtime_config_dir(run.project_id, run.run_id)
+        self._sync_app_sdd_config(binding)
+
         base_workflow = self.workflow_root / "config" / "workflow.yaml"
         workflow_raw = yaml.safe_load(base_workflow.read_text(encoding="utf-8")) or {}
         workflow_section = workflow_raw.setdefault("workflow", {})
         workflow_section["app_root"] = binding.app_root
         workflow_section["docs_dir"] = binding.docs_dir
-        e2e_section = workflow_section.setdefault("e2e", {})
-        if isinstance(e2e_section, dict):
-            e2e_section["headless"] = bool(run.headless_all_nodes)
 
         nodes = workflow_raw.get("nodes") or {}
         if isinstance(nodes, dict):
             for node_cfg in nodes.values():
-                if isinstance(node_cfg, dict):
-                    node_cfg["tool"] = run.tool
-                    if run.headless_all_nodes:
-                        node_cfg["mode"] = "headless"
+                if isinstance(node_cfg, dict) and run.headless_all_nodes:
+                    node_cfg["mode"] = "headless"
+
+        # 本次 run 的默认工具写入业务配置 defaults（节点级 tool 优先于 defaults）
+        from .config_loader import APP_CONFIG_DIR_NAME, APP_WORKFLOW_CONFIG_FILENAME
+
+        overlay_path = (
+            Path(binding.app_root).expanduser().resolve()
+            / APP_CONFIG_DIR_NAME
+            / APP_WORKFLOW_CONFIG_FILENAME
+        )
+        overlay = {}
+        if overlay_path.is_file():
+            overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(overlay, dict):
+                overlay = {}
+        defaults = overlay.get("defaults") if isinstance(overlay.get("defaults"), dict) else {}
+        defaults["tool"] = run.tool
+        overlay["defaults"] = defaults
+        overlay["docs_dir"] = binding.docs_dir or overlay.get("docs_dir") or "spec"
+        overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        overlay_path.write_text(
+            yaml.safe_dump(overlay, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
 
         runtime_workflow = runtime_dir / "workflow.yaml"
         runtime_workflow.write_text(
             yaml.safe_dump(workflow_raw, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
-
-        runtime_rules = {
-            "ai_rules_dir": binding.ai_rules_dir,
-            "node_rules": binding.node_rules,
-        }
-        (runtime_dir / "ai-rules.yaml").write_text(
-            yaml.safe_dump(runtime_rules, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
         return runtime_workflow
@@ -1035,33 +1190,50 @@ class WebApp:
                     run_id,
                     f"Workflow started on {platform_label()} ({sys.platform})",
                 )
+                if not run.headless_all_nodes and sys.platform == "darwin":
+                    self.state.append_run_log(
+                        run_id,
+                        "交互节点将在 Warp 新窗口启动 omp（需关闭「无界面」；系统需允许 Cursor/Terminal 自动化 Warp）",
+                    )
 
                 config_path = self._build_runtime_configs(run, binding)
                 wf_cfg = load_workflow_config(config_path)
-                if not run.skip_mcp_setup and wf_cfg.e2e_enabled:
+                if not run.skip_mcp_setup:
                     mcp_result = ensure_mcp_for_agents(
                         self.workflow_root,
-                        e2e_headless=wf_cfg.e2e_headless,
+                        e2e_headless=bool(run.headless_all_nodes),
                     )
                     self.state.append_run_log(
                         run_id,
                         f"MCP configured: servers={mcp_result.get('servers', [])}",
                     )
+                self.state.append_run_log(
+                    run_id,
+                    f"工具={run.tool} auto={run.auto} docs_dir={wf_cfg.docs_dir} "
+                    f"节点数={len(wf_cfg.nodes)}",
+                )
 
                 workflow = DevWorkflow(self.workflow_root, config_path)
                 source_file = Path(run.requirement_path) if run.requirement_path else None
                 if source_file and not source_file.exists():
                     source_file = None
 
-                result = workflow.run(
-                    requirement=run.requirement,
-                    docs_dir=binding.docs_dir,
-                    name=run.requirement_name or None,
-                    source_file=source_file,
-                    skip_clarification=run.skip_clarification,
-                    auto=run.auto,
-                    fresh=run.fresh,
+                interactive_runner.set_run_log_callback(
+                    lambda message: self.state.append_run_log(run_id, message),
                 )
+                try:
+                    # docs_dir 仅写在 runtime workflow.yaml；此处传 None 才会生成 docs/<任务名>/
+                    result = workflow.run(
+                        requirement=run.requirement,
+                        docs_dir=None,
+                        name=run.requirement_name or None,
+                        source_file=source_file,
+                        skip_clarification=run.skip_clarification,
+                        auto=run.auto,
+                        fresh=run.fresh,
+                    )
+                finally:
+                    interactive_runner.set_run_log_callback(None)
                 self.state.update_run(
                     run_id,
                     status="completed",
@@ -1120,7 +1292,7 @@ class WebApp:
             skip_clarification=skip_clarification,
             auto=auto,
             fresh=bool(payload.get("fresh", False)),
-            headless_all_nodes=bool(payload.get("headless_all_nodes", True)),
+            headless_all_nodes=bool(payload.get("headless_all_nodes", False)),
             skip_mcp_setup=bool(payload.get("skip_mcp_setup", False)),
             docs_dir=binding.docs_dir,
         )
@@ -1130,6 +1302,32 @@ class WebApp:
         worker = threading.Thread(target=self._run_workflow, args=(run.run_id,), daemon=True)
         worker.start()
         return self._enriched_run_dict(run)
+
+    def _resolve_settings_app_root(self, query: dict[str, list[str]]) -> Path:
+        project_id = str((query.get("project_id") or [""])[0]).strip()
+        if project_id:
+            binding = self.state.get_binding(project_id)
+            return Path(binding.app_root).expanduser().resolve()
+        app_root = str((query.get("app_root") or [""])[0]).strip()
+        if app_root:
+            return Path(app_root).expanduser().resolve()
+        projects = self.state.list_bindings()
+        if projects:
+            return Path(projects[0]["app_root"]).expanduser().resolve()
+        return self.workflow_root
+
+    def _resolve_settings_app_root_from_payload(self, payload: dict[str, Any]) -> Path:
+        project_id = str(payload.get("project_id") or "").strip()
+        if project_id:
+            binding = self.state.get_binding(project_id)
+            return Path(binding.app_root).expanduser().resolve()
+        app_root = str(payload.get("app_root") or "").strip()
+        if app_root:
+            return Path(app_root).expanduser().resolve()
+        projects = self.state.list_bindings()
+        if projects:
+            return Path(projects[0]["app_root"]).expanduser().resolve()
+        return self.workflow_root
 
     def _workflow_nodes(self) -> list[dict[str, Any]]:
         wf_cfg = load_workflow_config(self._workflow_config_path)
@@ -1145,6 +1343,10 @@ class WebApp:
                     "output": node_cfg.output_file,
                     "tool": node_cfg.tool,
                     "mode": node_cfg.mode,
+                    "model": getattr(node_cfg, "model", "") or "",
+                    "recommendation_threshold": getattr(
+                        node_cfg, "recommendation_threshold", 0.8
+                    ),
                 }
             )
         return nodes
@@ -1215,6 +1417,32 @@ class WebApp:
 
         if route == "/api/system/config":
             self._send_json(handler, HTTPStatus.OK, self.state.get_system_config())
+            return
+
+        if route == "/api/settings/nodes":
+            app_root = self._resolve_settings_app_root(query)
+            self._send_json(
+                handler,
+                HTTPStatus.OK,
+                settings_service.get_node_runtime_config(self.workflow_root, app_root),
+            )
+            return
+
+        if route == "/api/settings/mcp":
+            self._send_json(
+                handler,
+                HTTPStatus.OK,
+                settings_service.list_mcp_servers(self.workflow_root),
+            )
+            return
+
+        if route == "/api/settings/skills":
+            app_root = self._resolve_settings_app_root(query)
+            self._send_json(
+                handler,
+                HTTPStatus.OK,
+                settings_service.list_skills(self.workflow_root, app_root),
+            )
             return
 
         if route in ("/api/rule-dirs", "/api/rule-sets"):
@@ -1294,6 +1522,19 @@ class WebApp:
                 self._send_json(handler, HTTPStatus.OK, {"tasks": self.state.list_tasks(project_id)})
                 return
 
+            if len(parts) == 6 and parts[3] == "tasks" and parts[5] == "insights":
+                task_id = parts[4]
+                self._send_json(
+                    handler,
+                    HTTPStatus.OK,
+                    self._task_insights(project_id, task_id),
+                )
+                return
+
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "rule-sets" and parts[3] == "system-md":
+            self._send_json(handler, HTTPStatus.OK, self._rule_set_system_md(parts[2]))
+            return
+
         if route == "/api/runs":
             runs = [
                 self._enriched_run_dict(self.state.get_run(item["run_id"]))
@@ -1339,6 +1580,71 @@ class WebApp:
             payload = self._read_json_body(handler)
             updated = self.state.update_system_config(payload)
             self._send_json(handler, HTTPStatus.OK, updated)
+            return
+
+        if route == "/api/settings/nodes":
+            payload = self._read_json_body(handler)
+            app_root = self._resolve_settings_app_root_from_payload(payload)
+            updated = settings_service.update_node_runtime_config(
+                self.workflow_root,
+                app_root,
+                payload,
+            )
+            self._send_json(handler, HTTPStatus.OK, updated)
+            return
+
+        if route == "/api/settings/mcp":
+            payload = self._read_json_body(handler)
+            action = str(payload.get("action") or "update").strip()
+            if action == "sync":
+                app_root = self._resolve_settings_app_root_from_payload(payload)
+                result = settings_service.sync_mcp_to_project(
+                    self.workflow_root,
+                    app_root,
+                    headless=bool(payload.get("headless", False)),
+                )
+                self._send_json(handler, HTTPStatus.OK, result)
+                return
+            if action == "upsert":
+                server = payload.get("server")
+                if not isinstance(server, dict):
+                    raise ValueError("server must be an object")
+                updated = settings_service.upsert_mcp_server(self.workflow_root, server)
+                self._send_json(handler, HTTPStatus.OK, updated)
+                return
+            if action == "delete":
+                updated = settings_service.delete_mcp_server(
+                    self.workflow_root,
+                    str(payload.get("name") or "").strip(),
+                )
+                self._send_json(handler, HTTPStatus.OK, updated)
+                return
+            servers = payload.get("servers") or []
+            if not isinstance(servers, list):
+                raise ValueError("servers must be a list")
+            updated = settings_service.update_mcp_servers(self.workflow_root, servers)
+            self._send_json(handler, HTTPStatus.OK, updated)
+            return
+
+        if route == "/api/settings/skills":
+            payload = self._read_json_body(handler)
+            app_root = self._resolve_settings_app_root_from_payload(payload)
+            agents = payload.get("agents")
+            if agents is not None and not isinstance(agents, list):
+                raise ValueError("agents must be a list")
+            result = settings_service.install_project_skills(
+                self.workflow_root,
+                app_root,
+                agents=[str(a) for a in (agents or [])] or None,
+            )
+            self._send_json(handler, HTTPStatus.OK, result)
+            return
+
+        if route == "/api/settings/init":
+            payload = self._read_json_body(handler)
+            app_root = self._resolve_settings_app_root_from_payload(payload)
+            result = settings_service.init_project(self.workflow_root, app_root)
+            self._send_json(handler, HTTPStatus.OK, result)
             return
 
         if route == "/api/rule-sets":
@@ -1404,6 +1710,28 @@ class WebApp:
                 payload = self._read_json_body(handler)
                 task = self.state.create_task(project_id, payload)
                 self._send_json(handler, HTTPStatus.CREATED, {"task": task})
+                return
+
+            if (
+                len(parts) == 6
+                and parts[3] == "tasks"
+                and parts[5] == "qa-approval"
+            ):
+                task_id = parts[4]
+                payload = self._read_json_body(handler)
+                insights = self._task_insights(project_id, task_id)
+                docs_path = Path(str(insights.get("docs_path") or ""))
+                result = set_test_cases_approval(
+                    docs_path,
+                    status=str(payload.get("status") or "approved").strip(),
+                    user_note=str(payload.get("user_note") or "").strip(),
+                )
+                refreshed = self._task_insights(project_id, task_id)
+                self._send_json(
+                    handler,
+                    HTTPStatus.OK,
+                    {"approval": result, "insights": refreshed},
+                )
                 return
 
         if route == "/api/runs":
@@ -1484,6 +1812,14 @@ class WebApp:
                 create_folder=bool(payload.get("create_folder", False)),
             )
             self._send_json(handler, HTTPStatus.OK, {"rule_set": updated})
+            return
+
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "rule-sets" and parts[3] == "system-md":
+            payload = self._read_json_body(handler)
+            if "content" not in payload:
+                raise ValueError("content is required")
+            saved = self._save_rule_set_system_md(parts[2], str(payload.get("content") or ""))
+            self._send_json(handler, HTTPStatus.OK, saved)
             return
 
         self._send_json(handler, HTTPStatus.NOT_FOUND, {"error": "Not found"})

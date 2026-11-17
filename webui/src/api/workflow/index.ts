@@ -18,6 +18,8 @@ export interface WorkflowNodeDef {
   output: string;
   tool: string;
   mode: string;
+  model?: string;
+  recommendation_threshold?: number;
 }
 
 export interface ProjectBinding {
@@ -75,6 +77,86 @@ export interface SystemConfig {
   available_tools: AiToolOption[];
 }
 
+export interface NodeRuntimeRow {
+  id: string;
+  name: string;
+  tool: string;
+  model: string;
+  recommendation_threshold: number;
+  mode: string;
+}
+
+export interface NodeRuntimeConfig {
+  app_root: string;
+  docs_dir: string;
+  defaults: { tool: string; model: string };
+  nodes: NodeRuntimeRow[];
+  available_tools: AiToolOption[];
+}
+
+export interface McpServerItem {
+  name: string;
+  enabled: boolean;
+  command: string;
+  wrapper: string;
+  args: string[];
+  url: string;
+  description: string;
+}
+
+export interface TaskInsights {
+  project_id: string;
+  task_id: string;
+  task_name: string;
+  docs_path: string;
+  exists: boolean;
+  qa_review: {
+    status: string;
+    user_note: string;
+    file: string;
+    async: boolean;
+    blocks_core_flow: boolean;
+  };
+  release_confidence: {
+    score: number | null;
+    reached_0_8: boolean | null;
+    has_report: boolean;
+    test_passed: boolean | null;
+    result_rows: Record<string, number>;
+    highlights: string[];
+    file: string;
+    threshold: number;
+  };
+}
+
+export interface SystemMdContent {
+  rule_set_id: string;
+  path: string;
+  exists: boolean;
+  content: string;
+}
+
+export interface McpSettings {
+  path: string;
+  meta: Record<string, string>;
+  servers: McpServerItem[];
+}
+
+export interface SkillAgentItem {
+  agent: string;
+  tool: string;
+  path: string;
+  relative_dir: string;
+  installed: boolean;
+}
+
+export interface SkillSettings {
+  skill_name: string;
+  template_exists: boolean;
+  template_path: string;
+  agents: SkillAgentItem[];
+}
+
 export interface RuleSetItem {
   rule_set_id: string;
   name: string;
@@ -99,6 +181,60 @@ export const workflowApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  getNodeSettings: (projectId?: string) => {
+    const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+    return rawFetch<NodeRuntimeConfig>(`/api/settings/nodes${q}`);
+  },
+  updateNodeSettings: (body: {
+    project_id?: string;
+    docs_dir?: string;
+    defaults?: { tool?: string; model?: string };
+    nodes?: Array<{
+      id: string;
+      tool?: string;
+      model?: string;
+      recommendation_threshold?: number;
+    }>;
+  }) =>
+    rawFetch<NodeRuntimeConfig>('/api/settings/nodes', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  getMcpSettings: () => rawFetch<McpSettings>('/api/settings/mcp'),
+  updateMcpSettings: (servers: Array<{ name: string; enabled: boolean }>) =>
+    rawFetch<McpSettings>('/api/settings/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'update', servers }),
+    }),
+  upsertMcpServer: (server: Partial<McpServerItem> & { name: string }) =>
+    rawFetch<McpSettings>('/api/settings/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'upsert', server }),
+    }),
+  deleteMcpServer: (name: string) =>
+    rawFetch<McpSettings>('/api/settings/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'delete', name }),
+    }),
+  syncMcpSettings: (projectId?: string, headless = false) =>
+    rawFetch<Record<string, unknown>>('/api/settings/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'sync', project_id: projectId, headless }),
+    }),
+  getSkillSettings: (projectId?: string) => {
+    const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+    return rawFetch<SkillSettings>(`/api/settings/skills${q}`);
+  },
+  installSkills: (projectId?: string, agents?: string[]) =>
+    rawFetch<{ written: string[]; skills: SkillSettings }>('/api/settings/skills', {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId, agents }),
+    }),
+  initProjectSettings: (projectId?: string) =>
+    rawFetch<Record<string, unknown>>('/api/settings/init', {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId }),
+    }),
   getNodes: () => rawFetch<{ nodes: WorkflowNodeDef[] }>('/api/workflow/nodes'),
   getProjects: () => rawFetch<{ projects: ProjectBinding[] }>('/api/projects'),
   createProject: (body: Record<string, string>) =>
@@ -115,6 +251,20 @@ export const workflowApi = {
     rawFetch<{ deleted: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
   getTasks: (projectId: string) =>
     rawFetch<{ tasks: TaskItem[] }>(`/api/projects/${projectId}/tasks`),
+  getTaskInsights: (projectId: string, taskId: string) =>
+    rawFetch<TaskInsights>(`/api/projects/${projectId}/tasks/${taskId}/insights`),
+  approveTaskQa: (
+    projectId: string,
+    taskId: string,
+    body: { status?: string; user_note?: string } = {},
+  ) =>
+    rawFetch<{ approval: { status: string; user_note: string }; insights: TaskInsights }>(
+      `/api/projects/${projectId}/tasks/${taskId}/qa-approval`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
   createTask: (projectId: string, body: Record<string, string>) =>
     rawFetch<{ task: TaskItem }>(`/api/projects/${projectId}/tasks`, {
       method: 'POST',
@@ -188,6 +338,13 @@ export const workflowApi = {
     rawFetch<{ dir: string; files: string[]; file_count: number }>(
       `/api/rule-files?path=${encodeURIComponent(path)}`,
     ),
+  getRuleSetSystemMd: (ruleSetId: string) =>
+    rawFetch<SystemMdContent>(`/api/rule-sets/${ruleSetId}/system-md`),
+  saveRuleSetSystemMd: (ruleSetId: string, content: string) =>
+    rawFetch<SystemMdContent>(`/api/rule-sets/${ruleSetId}/system-md`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
   getProjectRules: (projectId: string) =>
     rawFetch<{ project_id: string; ai_rules_dir: string; node_rules: Record<string, string[]> }>(
       `/api/projects/${projectId}/rules`,

@@ -5,6 +5,7 @@ import { IconifyIcon } from '@vben/icons';
 import {
   Button,
   Empty,
+  Input,
   List,
   Space,
   Tabs,
@@ -24,15 +25,22 @@ const {
   files,
   loading,
   onBindSaved,
+  onSystemMdInput,
   openBindModal,
   openCreateModal,
   projects,
   refreshAll,
   ruleSets,
   saveNodeRules,
+  saveSystemMd,
+  savingSystemMd,
   selectRuleSet,
   selectedId,
   selectedRuleSet,
+  systemMd,
+  systemMdDirty,
+  systemMdExists,
+  systemMdPath,
 } = useRuleDirs();
 </script>
 
@@ -129,6 +137,37 @@ const {
                   :files="files"
                   :node-rules="selectedRuleSet.node_rules || {}"
                   @save="saveNodeRules"
+                />
+              </Tabs.TabPane>
+              <Tabs.TabPane key="system" tab="system.md">
+                <div class="mb-2 flex items-center justify-between gap-2">
+                  <div class="min-w-0 truncate text-xs opacity-45">
+                    {{ systemMdPath || 'system.md' }}
+                    <Tag
+                      class="ml-2 m-0 text-[10px]"
+                      :color="systemMdExists ? 'success' : 'default'"
+                    >
+                      {{ systemMdExists ? '已存在' : '未创建' }}
+                    </Tag>
+                    <Tag v-if="systemMdDirty" class="ml-1 m-0 text-[10px]" color="warning">
+                      未保存
+                    </Tag>
+                  </div>
+                  <Button
+                    :loading="savingSystemMd"
+                    size="small"
+                    type="primary"
+                    @click="saveSystemMd"
+                  >
+                    保存
+                  </Button>
+                </div>
+                <Input.TextArea
+                  :value="systemMd"
+                  :auto-size="{ minRows: 16, maxRows: 28 }"
+                  class="font-mono text-xs"
+                  placeholder="编写全局 system 规则（Markdown）…"
+                  @update:value="onSystemMdInput"
                 />
               </Tabs.TabPane>
               <Tabs.TabPane key="projects" tab="绑定项目">

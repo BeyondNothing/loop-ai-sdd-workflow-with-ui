@@ -15,8 +15,10 @@ import {
   Input,
   Menu,
   Modal,
+  Progress,
   Row,
   Select,
+  Space,
   Switch,
   Table,
   Tabs,
@@ -32,6 +34,7 @@ const prdPickerOpen = ref(false);
 const projectRootPickerOpen = ref(false);
 
 const {
+  approveQa,
   applyRuleDirToProject,
   deleteProject,
   editingProject,
@@ -46,6 +49,7 @@ const {
   projectModalOpen,
   projectRuns,
   projects,
+  qaBadge,
   refreshAll,
   ruleDirOptions,
   ruleDirPickerOpen,
@@ -55,18 +59,46 @@ const {
   selectedRun,
   selectedTaskId,
   selectProject,
-  selectRun,
   selectTask,
   startRun,
+  viewRun,
   statusColor,
   systemInfo,
   submitProject,
   submitTask,
+  taskInsights,
   taskModalOpen,
   taskNameInput,
   taskRunStatus,
   tasks,
 } = useWorkbench();
+
+const confidencePercent = computed(() => {
+  const score = taskInsights.value?.release_confidence?.score;
+  if (score == null || Number.isNaN(score)) return 0;
+  return Math.round(Math.min(1, Math.max(0, score)) * 100);
+});
+
+const confidenceColor = computed(() => {
+  const reached = taskInsights.value?.release_confidence?.reached_0_8;
+  if (reached === true) return '#52c41a';
+  if (reached === false) return '#faad14';
+  return '#1677ff';
+});
+
+function qaTagColor(status: string) {
+  if (status === 'approved') return 'success';
+  if (status === 'pending') return 'warning';
+  if (status === 'missing') return 'default';
+  return 'default';
+}
+
+function qaTagText(status: string) {
+  if (status === 'approved') return 'QA✓';
+  if (status === 'pending') return 'QA待审';
+  if (status === 'missing') return '无用例';
+  return '';
+}
 
 const nodeColumns = [
   { title: '#', dataIndex: 'index', width: 44, align: 'center' as const },
@@ -120,6 +152,11 @@ function onPrdPicked(path: string) {
 
 function onProjectRootPicked(path: string) {
   projectForm.app_root = path;
+}
+
+async function onViewRun(runId: string) {
+  const ok = await viewRun(runId);
+  if (ok) activeTab.value = 'logs';
 }
 </script>
 
@@ -227,19 +264,28 @@ function onProjectRootPicked(path: string) {
               class="nav-item flex cursor-pointer items-center justify-between gap-1 rounded px-2 py-1.5 text-sm transition-colors"
               @click="selectTask(t.task_id)"
             >
-              <span class="truncate">{{ t.task_name }}</span>
-              <Badge
-                v-if="taskRunStatus(t)"
-                :status="
-                  taskRunStatus(t) === 'running'
-                    ? 'processing'
-                    : taskRunStatus(t) === 'completed'
-                      ? 'success'
-                      : taskRunStatus(t) === 'failed'
-                        ? 'error'
-                        : 'default'
-                "
-              />
+              <span class="min-w-0 truncate">{{ t.task_name }}</span>
+              <div class="flex shrink-0 items-center gap-1">
+                <Tag
+                  v-if="qaTagText(qaBadge(t.task_id))"
+                  :color="qaTagColor(qaBadge(t.task_id))"
+                  class="m-0 px-1 text-[10px] leading-4"
+                >
+                  {{ qaTagText(qaBadge(t.task_id)) }}
+                </Tag>
+                <Badge
+                  v-if="taskRunStatus(t)"
+                  :status="
+                    taskRunStatus(t) === 'running'
+                      ? 'processing'
+                      : taskRunStatus(t) === 'completed'
+                        ? 'success'
+                        : taskRunStatus(t) === 'failed'
+                          ? 'error'
+                          : 'default'
+                  "
+                />
+              </div>
             </div>
             <Empty
               v-if="!tasks.length"
@@ -361,7 +407,9 @@ function onProjectRootPicked(path: string) {
                         <Switch v-model:checked="flags.auto" size="small" @click.stop />
                         <div>
                           <div class="option-card__title">无人值守</div>
-                          <div class="option-card__desc">门禁通过后自动继续</div>
+                          <div class="option-card__desc">
+                            使用 *.auto.md，门禁与推荐强度达标后自动继续
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -399,35 +447,144 @@ function onProjectRootPicked(path: string) {
             </Tabs.TabPane>
 
             <Tabs.TabPane key="pipeline" tab="流水线">
-              <Table
-                :columns="nodeColumns"
-                :data-source="nodeTableData"
-                :pagination="false"
-                :scroll="{ y: 'calc(100vh - 200px)' }"
-                row-key="key"
-                size="small"
-              >
-                <template #bodyCell="{ column, record }">
-                  <template v-if="column.dataIndex === 'status'">
-                    <Tag :color="statusColor(record.status)" class="m-0">
-                      {{ record.status }}
-                    </Tag>
+              <div class="flex h-full min-h-0 flex-col gap-3">
+                <Card
+                  v-if="selectedTaskId"
+                  class="shrink-0"
+                  size="small"
+                  title="质量洞察"
+                >
+                  <div class="grid gap-4 md:grid-cols-[160px_1fr]">
+                    <div class="flex flex-col items-center justify-center gap-1">
+                      <Progress
+                        :percent="confidencePercent"
+                        :stroke-color="confidenceColor"
+                        type="dashboard"
+                        :width="108"
+                      />
+                      <div class="text-xs opacity-50">发布置信度</div>
+                      <Tag
+                        v-if="taskInsights?.release_confidence?.reached_0_8 != null"
+                        :color="
+                          taskInsights.release_confidence.reached_0_8 ? 'success' : 'warning'
+                        "
+                        class="m-0"
+                      >
+                        {{
+                          taskInsights.release_confidence.reached_0_8
+                            ? '已达 0.8'
+                            : '未达 0.8'
+                        }}
+                      </Tag>
+                      <span
+                        v-else-if="!taskInsights?.release_confidence?.has_report"
+                        class="text-xs opacity-40"
+                      >
+                        尚无 05-test-report
+                      </span>
+                    </div>
+                    <div class="min-w-0 space-y-2">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-xs opacity-50">用例 QA（异步，不阻塞）</span>
+                        <Tag
+                          :color="qaTagColor(taskInsights?.qa_review?.status || '')"
+                          class="m-0"
+                        >
+                          {{
+                            qaTagText(taskInsights?.qa_review?.status || '') ||
+                            '未检测'
+                          }}
+                        </Tag>
+                        <Button
+                          v-if="taskInsights?.qa_review?.status === 'pending'"
+                          :loading="loading"
+                          size="small"
+                          type="primary"
+                          @click="approveQa('approved')"
+                        >
+                          标记通过
+                        </Button>
+                        <Button
+                          v-if="taskInsights?.qa_review?.status === 'approved'"
+                          :loading="loading"
+                          size="small"
+                          @click="approveQa('pending')"
+                        >
+                          重置待审
+                        </Button>
+                      </div>
+                      <div class="flex flex-wrap gap-2 text-xs">
+                        <Tag class="m-0">
+                          pass {{ taskInsights?.release_confidence?.result_rows?.pass || 0 }}
+                        </Tag>
+                        <Tag class="m-0">
+                          fail {{ taskInsights?.release_confidence?.result_rows?.fail || 0 }}
+                        </Tag>
+                        <Tag class="m-0">
+                          skip {{ taskInsights?.release_confidence?.result_rows?.skip || 0 }}
+                        </Tag>
+                        <Tag
+                          v-if="taskInsights?.release_confidence?.test_passed != null"
+                          :color="
+                            taskInsights.release_confidence.test_passed
+                              ? 'success'
+                              : 'error'
+                          "
+                          class="m-0"
+                        >
+                          test_passed=
+                          {{ taskInsights.release_confidence.test_passed ? 'true' : 'false' }}
+                        </Tag>
+                      </div>
+                      <ul
+                        v-if="taskInsights?.release_confidence?.highlights?.length"
+                        class="m-0 list-disc pl-4 text-xs opacity-70"
+                      >
+                        <li
+                          v-for="(line, idx) in taskInsights.release_confidence.highlights"
+                          :key="idx"
+                        >
+                          {{ line }}
+                        </li>
+                      </ul>
+                      <div v-else class="text-xs opacity-40">
+                        解析自任务 docs 下的 02-test-cases / 05-test-report
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+
+                <Table
+                  :columns="nodeColumns"
+                  :data-source="nodeTableData"
+                  :pagination="false"
+                  :scroll="{ y: 'calc(100vh - 360px)' }"
+                  class="min-h-0"
+                  row-key="key"
+                  size="small"
+                >
+                  <template #bodyCell="{ column, record }">
+                    <template v-if="column.dataIndex === 'status'">
+                      <Tag :color="statusColor(record.status)" class="m-0">
+                        {{ record.status }}
+                      </Tag>
+                    </template>
+                    <template v-else-if="column.dataIndex === 'action'">
+                      <Button
+                        v-if="record.hasArtifact"
+                        size="small"
+                        type="link"
+                        @click="openArtifact(record.nodeId)"
+                      >
+                        打开
+                      </Button>
+                    </template>
                   </template>
-                  <template v-else-if="column.dataIndex === 'action'">
-                    <Button
-                      v-if="record.hasArtifact"
-                      size="small"
-                      type="link"
-                      @click="openArtifact(record.nodeId)"
-                    >
-                      打开
-                    </Button>
+                  <template #emptyText>
+                    <Empty description="执行工作流后显示节点状态" />
                   </template>
-                </template>
-                <template #emptyText>
-                  <Empty description="执行工作流后显示节点状态" />
-                </template>
-              </Table>
+                </Table>
+              </div>
             </Tabs.TabPane>
 
             <Tabs.TabPane key="history" tab="执行历史">
@@ -449,7 +606,7 @@ function onProjectRootPicked(path: string) {
                     {{ record.auto ? '是' : '否' }}
                   </template>
                   <template v-else-if="column.dataIndex === 'action'">
-                    <Button size="small" type="link" @click="selectRun(record.run_id)">
+                    <Button size="small" type="link" @click.stop="onViewRun(record.run_id)">
                       查看
                     </Button>
                   </template>

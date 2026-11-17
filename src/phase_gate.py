@@ -11,13 +11,10 @@ from .parsers.clarification_parser import parse_clarification_checklist
 from .parsers.requirement_parser import parse_requirement_metadata
 from .state import DevWorkflowState
 
-DRAFT_DIR = "draft"
-
 
 @dataclass(frozen=True)
 class PhaseConfig:
     node_id: str
-    draft_file: str
     final_file: str
     approval_block: str
     approval_state_key: str
@@ -28,39 +25,13 @@ class PhaseConfig:
     allow_unresolved_checklist: bool = False
 
 
-def draft_dir(docs_dir: Path) -> Path:
-    return docs_dir / DRAFT_DIR
-
-
-def draft_path(docs_dir: Path, draft_filename: str) -> Path:
-    return docs_dir / DRAFT_DIR / draft_filename
-
-
-def resolve_draft_path(docs_dir: Path, draft_filename: str) -> Path:
-    """draft 目录下的路径；若仅有旧版平铺初稿则回退读取。"""
-    new = draft_path(docs_dir, draft_filename)
-    legacy = docs_dir / draft_filename
-    if legacy.exists() and not new.exists():
-        return legacy
-    return new
-
-
 def resolve_doc_path(docs_dir: Path, doc_key: str) -> Path:
-    if ".draft." in doc_key:
-        return resolve_draft_path(docs_dir, doc_key)
     return docs_dir / doc_key
-
-
-def ensure_draft_dir(docs_dir: Path) -> Path:
-    path = draft_dir(docs_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 PHASE_CONFIGS: dict[str, PhaseConfig] = {
     "analyze_requirements": PhaseConfig(
         node_id="analyze_requirements",
-        draft_file="01-requirements.draft.md",
         final_file="01-requirements.md",
         approval_block="requirement_approval",
         approval_state_key="requirement_approved",
@@ -69,38 +40,34 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
     ),
     "create_plan": PhaseConfig(
         node_id="create_plan",
-        draft_file="02-plan.draft.md",
         final_file="02-plan.md",
         approval_block="plan_approval",
         approval_state_key="plan_approved",
-        next_node="review_plan_and_tests",
+        next_node="review_plan",
         min_body_chars=200,
         requires_approval=False,
         allow_unresolved_checklist=True,
     ),
     "design_test_cases": PhaseConfig(
         node_id="design_test_cases",
-        draft_file="02-test-cases.draft.md",
         final_file="02-test-cases.md",
         approval_block="test_cases_approval",
         approval_state_key="test_cases_approved",
-        next_node="review_plan_and_tests",
+        next_node="review_plan",
         min_body_chars=200,
         requires_approval=False,
         allow_unresolved_checklist=True,
     ),
-    "review_plan_and_tests": PhaseConfig(
-        node_id="review_plan_and_tests",
-        draft_file="02-plan-test-review.draft.md",
-        final_file="02-plan-test-review.md",
-        approval_block="review_plan_tests_approval",
-        approval_state_key="review_plan_tests_approved",
+    "review_plan": PhaseConfig(
+        node_id="review_plan",
+        final_file="02-plan-review.md",
+        approval_block="review_plan_approval",
+        approval_state_key="review_plan_approved",
         next_node="split_tasks",
         min_body_chars=120,
     ),
     "split_tasks": PhaseConfig(
         node_id="split_tasks",
-        draft_file="03-tasks.draft.md",
         final_file="03-tasks.md",
         approval_block="tasks_approval",
         approval_state_key="tasks_approved",
@@ -145,7 +112,7 @@ CONTENT_VALIDATORS: dict[str, Callable[[str, PhaseConfig], bool]] = {
     and _validate_requirements_final(content),
     "create_plan": _validate_generic_final,
     "design_test_cases": _validate_generic_final,
-    "review_plan_and_tests": _validate_generic_final,
+    "review_plan": _validate_generic_final,
     "split_tasks": _validate_generic_final,
 }
 
@@ -203,15 +170,16 @@ def plan_and_tests_content_ready(docs_dir: Path, state: DevWorkflowState) -> boo
     )
 
 
-def review_plan_tests_complete(docs_dir: Path, state: DevWorkflowState) -> bool:
-    """Review 节点完成：review 定稿确认，且 plan / test-cases 均已同步并确认。"""
-    if not phase_complete(docs_dir, "review_plan_and_tests", state):
+def review_plan_complete(docs_dir: Path, state: DevWorkflowState) -> bool:
+    """Review plan 节点完成：review 定稿确认，且 plan 已同步确认。
+
+    注：test-cases 的 review 由 QA 异步进行，不阻塞核心流程，此处不检查 test_cases_approved。
+    """
+    if not phase_complete(docs_dir, "review_plan", state):
         return False
     if state.get("auto"):
         return True
-    return phase_user_approved(docs_dir, "create_plan") and phase_user_approved(
-        docs_dir, "design_test_cases"
-    )
+    return phase_user_approved(docs_dir, "create_plan")
 
 
 # --- 兼容旧 API ---

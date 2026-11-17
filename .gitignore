@@ -17,6 +17,9 @@ __pycache__/
 config/ai-rules.yaml
 .langgraph_api/
 
+# 引擎根目录上的业务运行时配置（由 init/install 生成，真源在 config/sdd-loop-workflow-config/）
+/sdd-loop-workflow-config/
+
 # Auto-generated MCP configs (start.sh / run.py → cli_sync)
 .cursor/mcp.json
 .mcp.json

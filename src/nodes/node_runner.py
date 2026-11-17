@@ -6,37 +6,84 @@ from datetime import datetime
 from pathlib import Path
 
 from ..agents.registry import get_ai_tool
-from ..config_loader import NodeConfig, WorkflowConfig
+from ..config_loader import NodeConfig, NodeScoringRules, WorkflowConfig
 from ..requirement_dir import resolve_app_root, resolve_docs_path
 from ..ai_rules_loader import build_ai_rules_prompt
 from ..parsers.clarification_parser import parse_clarification_checklist
 from ..parsers.approval_parser import (
     parse_plan_approval,
     parse_requirement_approval,
-    parse_review_plan_tests_approval,
+    parse_review_plan_approval,
     parse_tasks_approval,
     parse_test_cases_approval,
 )
-from ..parsers.requirement_parser import RequirementMetadata, parse_requirement_metadata
+from ..parsers.requirement_parser import (
+    RequirementMetadata,
+    format_role_scope,
+    parse_requirement_metadata,
+)
 from ..parsers.test_report_parser import parse_test_passed, verify_report_ready
 from ..parsers.workflow_status_parser import WorkflowStatus, upsert_workflow_status
 from ..phase_gate import (
     PHASE_CONFIGS,
-    draft_path,
-    ensure_draft_dir,
     get_phase_config,
     phase_complete,
     phase_content_ready,
     resolve_doc_path,
-    resolve_draft_path,
-    review_plan_tests_complete,
+    review_plan_complete,
 )
 from ..state import DevWorkflowState
 
 logger = logging.getLogger(__name__)
 
+EMPTY_SCORING_HINT = "（本节点未配置 suggestion_confidence 把握规则；按你的整体把握给 0-1 浮点，无法评估写 0.0）"
+
+
+def _format_rule_list(rules: list, label: str) -> list[str]:
+    lines: list[str] = []
+    for rule in rules:
+        lines.append(
+            f"  - {rule.condition}"
+            + (f"（{rule.reason}）" if rule.reason else "")
+        )
+    return lines
+
+
+def build_suggestion_confidence_prompt(
+    scoring_rules: dict[str, NodeScoringRules],
+    node_id: str,
+) -> str:
+    """把当前节点的 suggestion_confidence 把握规则渲染为可注入 prompt 的文本。"""
+    rules = scoring_rules.get(node_id)
+    if not rules:
+        return EMPTY_SCORING_HINT
+
+    lines: list[str] = []
+    if rules.description:
+        lines.append(f"**节点**：{rules.description}")
+    lines.append("")
+    lines.append("**高把握规则 high_confidence_rules**（命中则把握更高）：")
+    if rules.high_confidence_rules:
+        lines.extend(_format_rule_list(rules.high_confidence_rules, "high"))
+    else:
+        lines.append("  - （无）")
+    lines.append("")
+    lines.append("**低把握规则 low_confidence_rules**（命中则把握更低）：")
+    if rules.low_confidence_rules:
+        lines.extend(_format_rule_list(rules.low_confidence_rules, "low"))
+    else:
+        lines.append("  - （无）")
+    lines.append("")
+    lines.append(
+        "综合命中的高/低把握规则，自行给出 0-1 的 `suggestion_confidence`，"
+        "并在 `suggestion_reason` 注明命中的规则依据；无硬性公式。"
+    )
+    return "\n".join(lines)
+
 _PHASE_NODE_IDS = frozenset(PHASE_CONFIGS.keys())
-_CODE_WORK_NODES = frozenset({"implement_code", "verify_tests", "ai_review"})
+_CODE_WORK_NODES = frozenset(
+    {"implement_code", "verify_tests", "ai_review", "commit_code"}
+)
 
 
 class NodeRunner:
@@ -50,9 +97,17 @@ class NodeRunner:
         node_cfg = self.workflow_config.nodes[node_id]
         docs_dir = self._resolve_docs_dir(state)
 
-        prompt_template = self._load_prompt(node_cfg.prompt_file)
+        auto = bool(state.get("auto"))
+        prompt_rel = node_cfg.resolve_prompt_file(auto)
+        prompt_template = self._load_prompt(prompt_rel)
         context = self._build_context(node_cfg, state, docs_dir)
         prompt = self._render_prompt(prompt_template, context)
+        logger.info(
+            "节点 [%s] 使用 prompt %s（%s）",
+            node_cfg.name,
+            prompt_rel,
+            "无人值守" if auto else "人工介入",
+        )
 
         tool = get_ai_tool(node_cfg.tool)
         agent_cwd = self._agent_cwd(node_id)
@@ -60,14 +115,31 @@ class NodeRunner:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         interactive = node_cfg.mode == "interactive"
+        configured_model = (node_cfg.model or "").strip()
+        effective_model = configured_model
+        if node_cfg.tool == "echo" and configured_model:
+            logger.warning(
+                "节点 %s tool=echo 无模型概念，忽略 model=%s",
+                node_id,
+                configured_model,
+            )
+            effective_model = ""
 
         logger.info(
-            "节点 [%s] 使用工具 %s (%s) 开始执行",
+            "进入节点 [%s] (%s) tool=%s model=%s mode=%s",
             node_cfg.name,
+            node_id,
             node_cfg.tool,
+            effective_model or "(tool默认)",
             "interactive" if interactive else "headless",
         )
-        if node_cfg.tool in ("cursor", "claude_code", "oh_my_pi", "omp"):
+        if node_cfg.tool in (
+            "cursor",
+            "claude_code",
+            "codex",
+            "oh_my_pi",
+            "omp",
+        ):
             logger.info(
                 "%s 将把渲染后的 prompt 写入 %s/temp-prompts/%s.prompt.md",
                 node_cfg.tool,
@@ -88,7 +160,16 @@ class NodeRunner:
                 completion_check=completion_check,
                 node_id=node_id,
                 prompt_dir=str(docs_dir),
+                model=effective_model or None,
             )
+            # 交互结束仍未过门禁时打日志，避免「已 approved 却停住」难排查
+            if node_id in _PHASE_NODE_IDS and not completion_check():
+                logger.warning(
+                    "节点 [%s] 交互已结束，但阶段门禁未通过"
+                    "（内容结构/requirement_type/approval 等仍不满足 phase_complete）；"
+                    "将进入 END，续跑前请检查定稿 YAML",
+                    node_cfg.name,
+                )
             content, result = self._resolve_interactive_content(
                 docs_dir, output_path, node_id, result
             )
@@ -98,6 +179,7 @@ class NodeRunner:
                 cwd=str(agent_cwd),
                 node_id=node_id,
                 prompt_dir=str(docs_dir),
+                model=effective_model or None,
             )
             content, result = self._resolve_headless_content(
                 docs_dir, output_path, node_id, result
@@ -164,18 +246,13 @@ class NodeRunner:
     ) -> tuple[str, object]:
         cfg = get_phase_config(node_id)
         if cfg:
-            for name in (cfg.final_file, cfg.draft_file):
-                path = (
-                    resolve_draft_path(docs_dir, name)
-                    if ".draft." in name
-                    else docs_dir / name
-                )
-                if path.exists():
-                    text = path.read_text(encoding="utf-8").strip()
-                    if text:
-                        if not result.success:
-                            result.success = True
-                        return text, result
+            final = docs_dir / cfg.final_file
+            if final.exists():
+                text = final.read_text(encoding="utf-8").strip()
+                if text:
+                    if not result.success:
+                        result.success = True
+                    return text, result
 
         if output_path.exists():
             content = output_path.read_text(encoding="utf-8")
@@ -268,8 +345,6 @@ class NodeRunner:
         cfg = get_phase_config(node_id)
         if cfg:
             final_path = docs_dir / cfg.final_file
-            draft_path_resolved = resolve_draft_path(docs_dir, cfg.draft_file)
-
             if final_path.exists():
                 final_content = final_path.read_text(encoding="utf-8")
                 if node_id == "analyze_requirements":
@@ -280,20 +355,14 @@ class NodeRunner:
                     "analyze_requirements": parse_requirement_approval,
                     "create_plan": parse_plan_approval,
                     "design_test_cases": parse_test_cases_approval,
-                    "review_plan_and_tests": parse_review_plan_tests_approval,
+                    "review_plan": parse_review_plan_approval,
                     "split_tasks": parse_tasks_approval,
                 }[node_id]
                 state_key = cfg.approval_state_key if cfg else f"{node_id}_approved"
                 updates.update(approval_parser(final_content).to_state(state_key))
 
-            checklist_source = (
-                draft_path_resolved if draft_path_resolved.exists() else final_path
-            )
-            if checklist_source.exists():
-                checklist = parse_clarification_checklist(
-                    checklist_source.read_text(encoding="utf-8")
-                )
-                if checklist.items or checklist_source == draft_path_resolved:
+                checklist = parse_clarification_checklist(final_content)
+                if checklist.items:
                     updates.update(checklist.to_state())
 
         if node_id == "verify_tests":
@@ -315,8 +384,8 @@ class NodeRunner:
         output_path: Path,
     ):
         if node_id in _PHASE_NODE_IDS:
-            if node_id == "review_plan_and_tests":
-                return lambda: review_plan_tests_complete(docs_dir, state)
+            if node_id == "review_plan":
+                return lambda: review_plan_complete(docs_dir, state)
             return lambda: phase_complete(docs_dir, node_id, state)
         return lambda: _node_output_complete(node_id, output_path)
 
@@ -334,10 +403,7 @@ class NodeRunner:
         cfg = get_phase_config(node_cfg.node_id)
         paths: list[Path] = [output_path]
         if cfg:
-            paths = [
-                docs_dir / cfg.final_file,
-                resolve_draft_path(docs_dir, cfg.draft_file),
-            ]
+            paths = [docs_dir / cfg.final_file]
 
         for path in paths:
             if not path.exists():
@@ -392,11 +458,12 @@ class NodeRunner:
             "analyze_requirements": "requirements",
             "create_plan": "plan",
             "design_test_cases": "test_cases",
-            "review_plan_and_tests": "plan_test_review",
+            "review_plan": "plan_review",
             "split_tasks": "tasks",
             "implement_code": "implement",
             "verify_tests": "verify",
             "ai_review": "ai_review",
+            "commit_code": "commit",
         }
         phase = phase_labels.get(node_id, node_id)
         next_node = ""
@@ -413,6 +480,8 @@ class NodeRunner:
         elif node_id == "verify_tests":
             next_node = "ai_review"
         elif node_id == "ai_review":
+            next_node = "commit_code"
+        elif node_id == "commit_code":
             next_node = ""
 
         if skip and node_id == "analyze_requirements" and phase_complete(
@@ -483,27 +552,17 @@ class NodeRunner:
                 if state.get("skip_clarification")
                 else "否 — 初稿有待澄清/待决策项时，必须在会话中与用户确认。"
             ),
+            "role_scope": format_role_scope(
+                str(state.get("delivery_role") or ""),
+                list(state.get("delivery_blocks") or []),
+                str(state.get("role_basis") or ""),
+            ),
         }
-
-        if node_cfg.node_id == "verify_tests":
-            context["e2e_base_url"] = self.workflow_config.e2e_base_url.rstrip("/")
-            context["e2e_enabled"] = (
-                "true" if self.workflow_config.e2e_enabled else "false"
-            )
-            context["e2e_headless"] = (
-                "true" if self.workflow_config.e2e_headless else "false"
-            )
 
         cfg = get_phase_config(node_cfg.node_id)
         if cfg:
-            ensure_draft_dir(docs_dir)
-            context["draft_output_path"] = str(draft_path(docs_dir, cfg.draft_file))
             context["final_output_path"] = str(docs_dir / cfg.final_file)
         else:
-            ensure_draft_dir(docs_dir)
-            context["draft_output_path"] = str(
-                draft_path(docs_dir, "01-requirements.draft.md")
-            )
             context["final_output_path"] = str(docs_dir / "01-requirements.md")
 
         for inp in node_cfg.inputs:
@@ -544,6 +603,15 @@ class NodeRunner:
             app_root=state.get("app_root") or self.workflow_config.app_root,
         )
 
+        context["recommendation_threshold"] = str(
+            node_cfg.recommendation_threshold
+        )
+
+        context["suggestion_confidence_rules"] = build_suggestion_confidence_prompt(
+            self.workflow_config.suggestion_confidence_rules,
+            node_cfg.node_id,
+        )
+
         return context
 
     @staticmethod
@@ -560,6 +628,8 @@ class NodeRunner:
                         qid = raw.get("id", "")
                         question = raw.get("question", "")
                         lines.append(f"- [{qid}] {question}")
+                        if raw.get("as_is"):
+                            lines.append(f"  - 现状(AS-IS)：{raw['as_is']}")
                         if raw.get("why_it_matters"):
                             lines.append(f"  - 原因：{raw['why_it_matters']}")
                         if raw.get("suggestion"):
@@ -585,7 +655,9 @@ class NodeRunner:
         header = (
             f"# {node_cfg.name}\n\n"
             f"> 节点 ID: `{node_cfg.node_id}`\n"
-            f"> AI 工具: `{node_cfg.tool}`\n"
+            f"> AI 工具: `{node_cfg.tool}`"
+            + (f" model=`{node_cfg.model}`" if node_cfg.model else "")
+            + "\n"
             f"> 模式: `{node_cfg.mode}`\n"
             f"> 生成时间: {datetime.now().isoformat(timespec='seconds')}\n"
             f"> 执行状态: {'成功' if result.success else '需人工介入'}\n"

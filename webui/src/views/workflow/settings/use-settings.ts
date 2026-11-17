@@ -1,26 +1,114 @@
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 
-import { message } from 'ant-design-vue';
+import { Modal, message } from 'ant-design-vue';
 
-import { type AiToolOption, type SystemInfo, workflowApi } from '#/api/workflow';
+import {
+  type AiToolOption,
+  type McpServerItem,
+  type NodeRuntimeRow,
+  type ProjectBinding,
+  type SkillAgentItem,
+  type SystemInfo,
+  workflowApi,
+} from '#/api/workflow';
 
 export function useSettings() {
   const loading = ref(false);
   const saving = ref(false);
+  const syncing = ref(false);
+  const activeTab = ref('tool');
+  const mcpModalOpen = ref(false);
+  const mcpEditingName = ref('');
+  const mcpForm = reactive({
+    name: '',
+    enabled: true,
+    command: '',
+    wrapper: '',
+    url: '',
+    argsText: '',
+    description: '',
+  });
+
   const defaultTool = ref('omp');
   const tools = ref<AiToolOption[]>([]);
   const systemInfo = ref<SystemInfo | null>(null);
 
-  async function load() {
+  const projects = ref<ProjectBinding[]>([]);
+  const selectedProjectId = ref('');
+
+  const nodeDefaults = reactive({ tool: 'omp', model: '', docs_dir: 'spec' });
+  const nodeRows = ref<NodeRuntimeRow[]>([]);
+  const nodeAppRoot = ref('');
+
+  const mcpServers = ref<McpServerItem[]>([]);
+  const mcpPath = ref('');
+
+  const skillName = ref('start-workflow');
+  const skillAgents = ref<SkillAgentItem[]>([]);
+  const selectedSkillAgents = ref<string[]>([]);
+
+  const projectOptions = computed(() =>
+    projects.value.map((p) => ({ label: `${p.name} (${p.project_id})`, value: p.project_id })),
+  );
+
+  const toolSelectOptions = computed(() =>
+    tools.value.map((t) => ({ label: `${t.name} (${t.id})`, value: t.id })),
+  );
+
+  async function loadProjects() {
+    const data = await workflowApi.getProjects();
+    projects.value = data.projects || [];
+    if (!selectedProjectId.value && projects.value.length) {
+      selectedProjectId.value = projects.value[0]!.project_id;
+    }
+  }
+
+  async function loadBase() {
+    const [config, info] = await Promise.all([
+      workflowApi.getSystemConfig(),
+      workflowApi.getSystemInfo(),
+    ]);
+    defaultTool.value = config.default_tool || 'omp';
+    tools.value = config.available_tools || [];
+    systemInfo.value = info;
+  }
+
+  async function loadNodeSettings() {
+    const data = await workflowApi.getNodeSettings(selectedProjectId.value || undefined);
+    nodeAppRoot.value = data.app_root;
+    nodeDefaults.tool = data.defaults?.tool || 'omp';
+    nodeDefaults.model = data.defaults?.model || '';
+    nodeDefaults.docs_dir = data.docs_dir || 'spec';
+    nodeRows.value = (data.nodes || []).map((n) => ({ ...n }));
+    if (data.available_tools?.length) {
+      tools.value = data.available_tools;
+    }
+  }
+
+  async function loadMcp() {
+    const data = await workflowApi.getMcpSettings();
+    mcpPath.value = data.path;
+    mcpServers.value = (data.servers || []).map((s) => ({ ...s }));
+  }
+
+  async function loadSkills() {
+    const data = await workflowApi.getSkillSettings(selectedProjectId.value || undefined);
+    skillName.value = data.skill_name;
+    skillAgents.value = data.agents || [];
+    selectedSkillAgents.value = (data.agents || [])
+      .filter((a) => a.installed)
+      .map((a) => a.agent);
+    if (!selectedSkillAgents.value.length) {
+      selectedSkillAgents.value = (data.agents || []).map((a) => a.agent);
+    }
+  }
+
+  async function loadAll() {
     loading.value = true;
     try {
-      const [config, info] = await Promise.all([
-        workflowApi.getSystemConfig(),
-        workflowApi.getSystemInfo(),
-      ]);
-      defaultTool.value = config.default_tool || 'omp';
-      tools.value = config.available_tools || [];
-      systemInfo.value = info;
+      await loadProjects();
+      await loadBase();
+      await Promise.all([loadNodeSettings(), loadMcp(), loadSkills()]);
     } catch (e) {
       message.error(String(e));
     } finally {
@@ -28,7 +116,18 @@ export function useSettings() {
     }
   }
 
-  async function save() {
+  async function onProjectChange() {
+    loading.value = true;
+    try {
+      await Promise.all([loadNodeSettings(), loadSkills()]);
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function saveDefaultTool() {
     saving.value = true;
     try {
       const config = await workflowApi.updateSystemConfig({
@@ -36,7 +135,7 @@ export function useSettings() {
       });
       defaultTool.value = config.default_tool;
       tools.value = config.available_tools || tools.value;
-      message.success('系统配置已保存');
+      message.success('默认工具已保存');
     } catch (e) {
       message.error(String(e));
     } finally {
@@ -44,14 +143,186 @@ export function useSettings() {
     }
   }
 
-  onMounted(load);
+  async function saveNodeSettings() {
+    saving.value = true;
+    try {
+      const data = await workflowApi.updateNodeSettings({
+        project_id: selectedProjectId.value || undefined,
+        docs_dir: nodeDefaults.docs_dir,
+        defaults: { tool: nodeDefaults.tool, model: nodeDefaults.model },
+        nodes: nodeRows.value.map((n) => ({
+          id: n.id,
+          tool: n.tool,
+          model: n.model,
+          recommendation_threshold: n.recommendation_threshold,
+        })),
+      });
+      nodeRows.value = (data.nodes || []).map((n) => ({ ...n }));
+      message.success('节点配置已写入业务 sdd-loop-workflow-config/workflow.yaml');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  async function saveMcp() {
+    saving.value = true;
+    try {
+      const data = await workflowApi.updateMcpSettings(
+        mcpServers.value.map((s) => ({ name: s.name, enabled: s.enabled })),
+      );
+      mcpServers.value = (data.servers || []).map((s) => ({ ...s }));
+      message.success('MCP 开关已保存到 config/mcp/servers.json');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  function openMcpModal(server?: McpServerItem) {
+    mcpEditingName.value = server?.name || '';
+    mcpForm.name = server?.name || '';
+    mcpForm.enabled = server?.enabled ?? true;
+    mcpForm.command = server?.command || '';
+    mcpForm.wrapper = server?.wrapper || '';
+    mcpForm.url = server?.url || '';
+    mcpForm.argsText = (server?.args || []).join(' ');
+    mcpForm.description = server?.description || '';
+    mcpModalOpen.value = true;
+  }
+
+  async function submitMcpModal() {
+    const name = mcpForm.name.trim();
+    if (!name) {
+      message.warning('请填写服务器名称');
+      return;
+    }
+    if (!mcpForm.command.trim() && !mcpForm.wrapper.trim() && !mcpForm.url.trim()) {
+      message.warning('请至少填写 command / wrapper / url 之一');
+      return;
+    }
+    saving.value = true;
+    try {
+      // 若改名：先写新条目再删旧条目
+      const data = await workflowApi.upsertMcpServer({
+        name,
+        enabled: mcpForm.enabled,
+        command: mcpForm.command.trim(),
+        wrapper: mcpForm.wrapper.trim(),
+        url: mcpForm.url.trim(),
+        args: mcpForm.argsText
+          .split(/\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+        description: mcpForm.description.trim(),
+      });
+      if (mcpEditingName.value && mcpEditingName.value !== name) {
+        await workflowApi.deleteMcpServer(mcpEditingName.value);
+        const refreshed = await workflowApi.getMcpSettings();
+        mcpServers.value = (refreshed.servers || []).map((s) => ({ ...s }));
+      } else {
+        mcpServers.value = (data.servers || []).map((s) => ({ ...s }));
+      }
+      mcpModalOpen.value = false;
+      message.success(mcpEditingName.value ? 'MCP 服务器已更新' : 'MCP 服务器已新增');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  function deleteMcp(name: string) {
+    Modal.confirm({
+      title: `删除 MCP 服务器「${name}」？`,
+      content: '将从 config/mcp/servers.json 移除该定义。',
+      okType: 'danger',
+      okText: '删除',
+      onOk: async () => {
+        const data = await workflowApi.deleteMcpServer(name);
+        mcpServers.value = (data.servers || []).map((s) => ({ ...s }));
+        message.success('已删除');
+      },
+    });
+  }
+
+  async function syncMcp() {
+    syncing.value = true;
+    try {
+      await workflowApi.syncMcpSettings(selectedProjectId.value || undefined);
+      message.success('已同步 MCP 到引擎与业务项目（.cursor/.omp/.mcp.json 等）');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      syncing.value = false;
+    }
+  }
+
+  async function installSkills() {
+    syncing.value = true;
+    try {
+      const data = await workflowApi.installSkills(
+        selectedProjectId.value || undefined,
+        selectedSkillAgents.value,
+      );
+      skillAgents.value = data.skills?.agents || [];
+      message.success(`已安装 skill 到 ${data.written?.length || 0} 个目录`);
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      syncing.value = false;
+    }
+  }
+
+  async function initProject() {
+    syncing.value = true;
+    try {
+      await workflowApi.initProjectSettings(selectedProjectId.value || undefined);
+      await Promise.all([loadNodeSettings(), loadSkills(), loadMcp()]);
+      message.success('已初始化业务配置 + skill + MCP 同步');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      syncing.value = false;
+    }
+  }
+
+  onMounted(loadAll);
 
   return {
+    activeTab,
     defaultTool,
+    deleteMcp,
+    initProject,
+    installSkills,
     loading,
-    save,
+    mcpEditingName,
+    mcpForm,
+    mcpModalOpen,
+    mcpPath,
+    mcpServers,
+    nodeAppRoot,
+    nodeDefaults,
+    nodeRows,
+    onProjectChange,
+    openMcpModal,
+    projectOptions,
+    projects,
+    saveDefaultTool,
+    saveMcp,
+    saveNodeSettings,
     saving,
+    selectedProjectId,
+    selectedSkillAgents,
+    skillAgents,
+    skillName,
+    submitMcpModal,
+    syncMcp,
+    syncing,
     systemInfo,
+    toolSelectOptions,
     tools,
   };
 }

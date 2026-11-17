@@ -16,6 +16,11 @@ export function useRuleDirs() {
   const bindModalOpen = ref(false);
   const createModalOpen = ref(false);
   const files = ref<string[]>([]);
+  const systemMd = ref('');
+  const systemMdPath = ref('');
+  const systemMdExists = ref(false);
+  const systemMdDirty = ref(false);
+  const savingSystemMd = ref(false);
 
   const selectedRuleSet = computed(
     () => ruleSets.value.find((item) => item.rule_set_id === selectedId.value) || null,
@@ -48,15 +53,62 @@ export function useRuleDirs() {
     }
   }
 
+  async function loadSystemMd(ruleSetId: string) {
+    try {
+      const data = await workflowApi.getRuleSetSystemMd(ruleSetId);
+      systemMd.value = data.content || '';
+      systemMdPath.value = data.path || '';
+      systemMdExists.value = !!data.exists;
+      systemMdDirty.value = false;
+    } catch {
+      systemMd.value = '';
+      systemMdPath.value = '';
+      systemMdExists.value = false;
+      systemMdDirty.value = false;
+    }
+  }
+
+  async function saveSystemMd() {
+    if (!selectedRuleSet.value) return;
+    savingSystemMd.value = true;
+    try {
+      const data = await workflowApi.saveRuleSetSystemMd(
+        selectedRuleSet.value.rule_set_id,
+        systemMd.value,
+      );
+      systemMd.value = data.content || '';
+      systemMdPath.value = data.path || '';
+      systemMdExists.value = true;
+      systemMdDirty.value = false;
+      message.success('system.md 已保存');
+      await loadFiles(selectedRuleSet.value.resolved_path);
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      savingSystemMd.value = false;
+    }
+  }
+
+  function onSystemMdInput(value: string) {
+    systemMd.value = value;
+    systemMdDirty.value = true;
+  }
+
   async function refreshAll() {
     loading.value = true;
     try {
       await Promise.all([loadProjects(), loadRuleSets()]);
       const current = selectedRuleSet.value;
       if (current?.resolved_path) {
-        await loadFiles(current.resolved_path);
+        await Promise.all([
+          loadFiles(current.resolved_path),
+          loadSystemMd(current.rule_set_id),
+        ]);
       } else {
         files.value = [];
+        systemMd.value = '';
+        systemMdPath.value = '';
+        systemMdExists.value = false;
       }
     } catch (e) {
       message.error(String(e));
@@ -68,7 +120,10 @@ export function useRuleDirs() {
   function selectRuleSet(ruleSetId: string) {
     selectedId.value = ruleSetId;
     const hit = ruleSets.value.find((item) => item.rule_set_id === ruleSetId);
-    if (hit?.resolved_path) loadFiles(hit.resolved_path);
+    if (hit?.resolved_path) {
+      loadFiles(hit.resolved_path);
+      loadSystemMd(hit.rule_set_id);
+    }
   }
 
   function openBindModal() {
@@ -124,14 +179,21 @@ export function useRuleDirs() {
     files,
     loading,
     onBindSaved,
+    onSystemMdInput,
     openBindModal,
     openCreateModal,
     projects,
     refreshAll,
     ruleSets,
     saveNodeRules,
+    saveSystemMd,
+    savingSystemMd,
     selectRuleSet,
     selectedId,
     selectedRuleSet,
+    systemMd,
+    systemMdDirty,
+    systemMdExists,
+    systemMdPath,
   };
 }

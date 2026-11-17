@@ -59,7 +59,16 @@ def resolve_app_root(workflow_root: Path, app_root: str | None = None) -> Path:
 
     workflow_root: 编排仓库根目录（本仓库）
     app_root: 配置值，相对 workflow_root 或绝对路径；默认 ``..``（上级目录）
+
+    若设置了环境变量 ``SDD_LOOP_WORKFLOW_APP_ROOT``（sddl:start 会写入运行时 cwd），
+    则优先用它，便于在任意目录启动并绑定到当前业务项目。
     """
+    import os
+
+    override = (os.environ.get("SDD_LOOP_WORKFLOW_APP_ROOT") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+
     workflow_root = workflow_root.resolve()
     raw = (app_root or "..").strip() or ".."
     path = Path(raw)
@@ -90,7 +99,6 @@ def resolve_requirement_docs_dir(
         if not path.is_absolute():
             path = app_root / path
         path.mkdir(parents=True, exist_ok=True)
-        (path / "draft").mkdir(parents=True, exist_ok=True)
         try:
             relative = str(path.relative_to(app_root))
         except ValueError:
@@ -109,7 +117,6 @@ def resolve_requirement_docs_dir(
         target = app_root / base / slug
         relative = str(base / slug)
     target.mkdir(parents=True, exist_ok=True)
-    (target / "draft").mkdir(parents=True, exist_ok=True)
     return relative, slug
 
 
