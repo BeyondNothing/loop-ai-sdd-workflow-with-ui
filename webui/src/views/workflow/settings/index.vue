@@ -26,8 +26,14 @@ import { useSettings } from './use-settings';
 
 const {
   activeTab,
+  addConfidenceRule,
+  confidenceEnginePath,
+  confidenceNodeId,
+  confidenceNodeOptions,
+  confidencePath,
   defaultTool,
   deleteMcp,
+  engineRulesForSelected,
   initProject,
   installSkills,
   loading,
@@ -41,11 +47,17 @@ const {
   nodeRows,
   onProjectChange,
   openMcpModal,
+  probeConnectivity,
+  probeResult,
+  probing,
   projectOptions,
+  removeConfidenceRule,
+  saveConfidenceRules,
   saveDefaultTool,
   saveMcp,
   saveNodeSettings,
   saving,
+  selectedConfidenceNode,
   selectedProjectId,
   selectedSkillAgents,
   skillAgents,
@@ -74,10 +86,10 @@ const nodeColumns = [
         <div>
           <h2 class="text-lg font-medium">系统设置</h2>
           <p class="text-sm opacity-50">
-            默认工具、节点 tool/model/推荐阈值、MCP 与 Skill 均可配置；节点/Skill 作用于当前业务项目。
+            默认工具、节点、置信度规则、MCP 与 Skill 均可配置；节点/Skill/置信度作用于当前业务项目。
           </p>
         </div>
-        <Space>
+        <Space wrap>
           <Select
             v-model:value="selectedProjectId"
             :options="projectOptions"
@@ -86,12 +98,84 @@ const nodeColumns = [
             placeholder="选择业务项目"
             @change="onProjectChange"
           />
+          <Button :loading="probing" @click="probeConnectivity">
+            <IconifyIcon class="mr-1" icon="lucide:radar" />
+            连通探测
+          </Button>
           <Button :loading="syncing" @click="initProject">
             <IconifyIcon class="mr-1" icon="lucide:folder-cog" />
             一键初始化
           </Button>
         </Space>
       </div>
+
+      <Card
+        v-if="probeResult"
+        :loading="probing"
+        size="small"
+        title="连通探测结果"
+      >
+        <div class="mb-3 flex flex-wrap items-center gap-2 text-sm">
+          <Tag :color="probeResult.ok ? 'success' : 'warning'">
+            {{ probeResult.ok ? '全部就绪' : '存在异常' }}
+          </Tag>
+          <span class="opacity-60">MCP {{ probeResult.mcp.summary }}</span>
+          <span class="opacity-60">·</span>
+          <span class="opacity-60">Skill {{ probeResult.skills.summary }}</span>
+        </div>
+        <div class="grid gap-3 md:grid-cols-2">
+          <div>
+            <div class="mb-2 text-sm font-medium">MCP 服务器</div>
+            <div class="space-y-1">
+              <div
+                v-for="server in probeResult.mcp.servers"
+                :key="server.name"
+                class="flex items-center justify-between rounded border border-border/50 px-2 py-1 text-xs"
+              >
+                <span>{{ server.name }}</span>
+                <Tag
+                  :color="server.ok ? 'success' : 'error'"
+                  class="m-0"
+                >
+                  {{ server.message || (server.ok ? '就绪' : '异常') }}
+                </Tag>
+              </div>
+            </div>
+            <div class="mt-2 space-y-1">
+              <div
+                v-for="item in probeResult.mcp.agent_sync"
+                :key="item.path"
+                class="truncate text-[11px] opacity-55"
+              >
+                <Tag :color="item.ok ? 'success' : 'default'" class="m-0 mr-1">
+                  {{ item.ok ? 'OK' : '缺' }}
+                </Tag>
+                {{ item.path }}
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="mb-2 text-sm font-medium">Skill</div>
+            <div class="space-y-1">
+              <div
+                v-for="agent in probeResult.skills.agents"
+                :key="agent.agent"
+                class="flex items-center justify-between rounded border border-border/50 px-2 py-1 text-xs"
+              >
+                <span>
+                  {{ agent.agent }}
+                  <span v-if="agent.stale_hint" class="ml-1 opacity-45">
+                    (与模板大小不同)
+                  </span>
+                </span>
+                <Tag :color="agent.ok ? 'success' : 'warning'" class="m-0">
+                  {{ agent.message }}
+                </Tag>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Card>
 
       <Card :loading="loading" size="small" title="运行环境">
         <Descriptions v-if="systemInfo" :column="3" size="small">
@@ -206,6 +290,132 @@ const nodeColumns = [
                 保存节点配置
               </Button>
             </div>
+          </Tabs.TabPane>
+
+          <Tabs.TabPane key="confidence" tab="置信度规则">
+            <p class="mb-3 text-xs opacity-50">
+              编辑业务扩展规则（叠加引擎基线）。写入
+              <code>{{ confidencePath || 'sdd-loop-workflow-config/suggestion-confidence-rules.yaml' }}</code>
+              ；引擎基线只读：
+              <code>{{ confidenceEnginePath || 'config/suggestion-confidence-rules.yaml' }}</code>
+            </p>
+            <div class="mb-3 flex flex-wrap items-center gap-2">
+              <Select
+                v-model:value="confidenceNodeId"
+                :options="confidenceNodeOptions"
+                class="w-[320px]"
+                placeholder="选择节点"
+              />
+              <Input
+                v-if="selectedConfidenceNode"
+                v-model:value="selectedConfidenceNode.description"
+                class="w-[240px]"
+                placeholder="节点描述"
+              />
+            </div>
+            <Empty
+              v-if="!selectedConfidenceNode"
+              description="请选择业务项目与节点"
+            />
+            <template v-else>
+              <Card
+                v-if="engineRulesForSelected"
+                class="mb-3"
+                size="small"
+                title="引擎基线（只读）"
+              >
+                <div class="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <div class="mb-1 text-xs opacity-50">高把握</div>
+                    <ul class="m-0 list-disc pl-4 text-xs opacity-70">
+                      <li
+                        v-for="(r, i) in engineRulesForSelected.high_confidence_rules"
+                        :key="`eh-${i}`"
+                      >
+                        {{ r.condition }}
+                      </li>
+                    </ul>
+                  </div>
+                  <div>
+                    <div class="mb-1 text-xs opacity-50">低把握</div>
+                    <ul class="m-0 list-disc pl-4 text-xs opacity-70">
+                      <li
+                        v-for="(r, i) in engineRulesForSelected.low_confidence_rules"
+                        :key="`el-${i}`"
+                      >
+                        {{ r.condition }}
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </Card>
+
+              <div class="mb-2 flex items-center justify-between">
+                <span class="text-sm font-medium">项目扩展 · 高把握</span>
+                <Button size="small" type="dashed" @click="addConfidenceRule('high')">
+                  添加
+                </Button>
+              </div>
+              <div class="mb-4 space-y-2">
+                <div
+                  v-for="(rule, idx) in selectedConfidenceNode.high_confidence_rules"
+                  :key="`h-${idx}`"
+                  class="grid gap-2 rounded border border-border/50 p-2 md:grid-cols-[1fr_1fr_auto]"
+                >
+                  <Input v-model:value="rule.condition" placeholder="condition" size="small" />
+                  <Input v-model:value="rule.reason" placeholder="reason" size="small" />
+                  <Button
+                    danger
+                    size="small"
+                    type="text"
+                    @click="removeConfidenceRule('high', idx)"
+                  >
+                    删
+                  </Button>
+                </div>
+                <Empty
+                  v-if="!selectedConfidenceNode.high_confidence_rules.length"
+                  :image-style="{ height: 36 }"
+                  description="暂无扩展高把握规则"
+                />
+              </div>
+
+              <div class="mb-2 flex items-center justify-between">
+                <span class="text-sm font-medium">项目扩展 · 低把握</span>
+                <Button size="small" type="dashed" @click="addConfidenceRule('low')">
+                  添加
+                </Button>
+              </div>
+              <div class="mb-3 space-y-2">
+                <div
+                  v-for="(rule, idx) in selectedConfidenceNode.low_confidence_rules"
+                  :key="`l-${idx}`"
+                  class="grid gap-2 rounded border border-border/50 p-2 md:grid-cols-[1fr_1fr_auto]"
+                >
+                  <Input v-model:value="rule.condition" placeholder="condition" size="small" />
+                  <Input v-model:value="rule.reason" placeholder="reason" size="small" />
+                  <Button
+                    danger
+                    size="small"
+                    type="text"
+                    @click="removeConfidenceRule('low', idx)"
+                  >
+                    删
+                  </Button>
+                </div>
+                <Empty
+                  v-if="!selectedConfidenceNode.low_confidence_rules.length"
+                  :image-style="{ height: 36 }"
+                  description="暂无扩展低把握规则"
+                />
+              </div>
+
+              <div class="flex justify-end">
+                <Button :loading="saving" type="primary" @click="saveConfidenceRules">
+                  保存置信度规则
+                </Button>
+              </div>
+            </template>
           </Tabs.TabPane>
 
           <Tabs.TabPane key="mcp" tab="MCP">

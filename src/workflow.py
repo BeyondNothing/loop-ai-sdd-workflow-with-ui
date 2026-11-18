@@ -1,7 +1,7 @@
 """LangGraph workflow 编排 — 节点与边在代码中固定定义。"""
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from langgraph.graph import END, StateGraph
@@ -21,6 +21,7 @@ from .requirement_dir import (
     save_original_requirement,
 )
 from .router import determine_start_node, is_workflow_complete, restore_state_from_docs
+from .run_control import RunCancelled, kill_active_processes, raise_if_cancelled
 from .state import DevWorkflowState
 
 logger = logging.getLogger(__name__)
@@ -53,20 +54,49 @@ class DevWorkflow:
 
         merged: DevWorkflowState = {}
         errors: list[str] = []
+        pool = ThreadPoolExecutor(max_workers=2)
+        futures = {
+            pool.submit(self.node_runner.run_node, node_id, state): node_id
+            for node_id in _PARALLEL_BRANCHES
+        }
+        pending = set(futures)
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {
-                pool.submit(self.node_runner.run_node, node_id, state): node_id
-                for node_id in _PARALLEL_BRANCHES
-            }
-            for future in as_completed(futures):
-                node_id = futures[future]
-                try:
-                    branch_updates = future.result()
-                    merged = self._merge_branch_updates(merged, branch_updates)
-                except Exception as exc:
-                    logger.exception("并行节点 %s 失败", node_id)
-                    errors.append(f"{node_id}: {exc}")
+        def _abort_parallel(reason: str) -> None:
+            for fut in list(futures):
+                fut.cancel()
+            kill_active_processes()
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise RunCancelled(reason)
+
+        try:
+            while pending:
+                raise_if_cancelled("并行 plan/tests")
+                done, pending = wait(
+                    pending, timeout=0.5, return_when=FIRST_COMPLETED
+                )
+                if not done:
+                    continue
+                for future in done:
+                    node_id = futures[future]
+                    try:
+                        branch_updates = future.result()
+                        merged = self._merge_branch_updates(merged, branch_updates)
+                    except RunCancelled:
+                        logger.info("并行节点 %s 被取消，中止另一分支", node_id)
+                        _abort_parallel(
+                            f"运行已被用户取消（并行节点 {node_id}）"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("并行节点 %s 失败", node_id)
+                        errors.append(f"{node_id}: {exc}")
+            raise_if_cancelled("并行 plan/tests 合并前")
+        except RunCancelled:
+            for fut in list(futures):
+                fut.cancel()
+            kill_active_processes()
+            raise
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if errors:
             merged["last_error"] = "; ".join(errors)
@@ -231,6 +261,8 @@ class DevWorkflow:
         skip_clarification: bool = False,
         auto: bool = False,
         fresh: bool = False,
+        resume_from_node: str | None = None,
+        single_node: bool = False,
     ) -> DevWorkflowState:
         # --auto 隐含跳过澄清；门禁在内容就绪后自动通过（见 phase_gate）
         if auto:
@@ -254,7 +286,8 @@ class DevWorkflow:
 
         original_path = save_original_requirement(docs_path, requirement)
 
-        if is_workflow_complete(docs_path):
+        forced_start = (resume_from_node or "").strip()
+        if not forced_start and is_workflow_complete(docs_path) and not single_node:
             logger.info("Workflow 已完成（07-commit.md status=completed）")
             done_state: DevWorkflowState = {
                 "requirement": requirement,
@@ -271,9 +304,11 @@ class DevWorkflow:
             )
             return done_state
 
-        start_node = determine_start_node(
+        start_node = forced_start or determine_start_node(
             docs_path, skip_clarification=skip_clarification, auto=auto
         )
+        if start_node not in self.workflow_config.nodes and start_node != "parallel_plan_and_tests":
+            raise ValueError(f"未知节点: {start_node}")
 
         initial: DevWorkflowState = {
             "requirement": requirement,
@@ -315,6 +350,16 @@ class DevWorkflow:
         initial.update(
             restore_state_from_docs(docs_path, skip_clarification, auto=auto)
         )
+        initial["resume_from_node"] = start_node
+
+        if single_node:
+            logger.info("单节点执行 → %s", start_node)
+            if start_node == "parallel_plan_and_tests":
+                updates = self.parallel_plan_and_tests(initial)
+            else:
+                updates = self.node_runner.run_node(start_node, initial)
+            return self._merge_branch_updates(dict(initial), updates)
+
         return self._graph.invoke(initial)
 
 

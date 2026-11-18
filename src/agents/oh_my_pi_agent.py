@@ -58,15 +58,14 @@ class OhMyPiTool(AITool):
         )
         self._log_launch_cmd(cmd, cwd)
         try:
+            from ..run_control import RunCancelled, run_cancellable_subprocess
+
             logger.info("调用 Oh My Pi CLI (headless): %s", binary)
-            proc = subprocess.run(
+            proc = run_cancellable_subprocess(
                 cmd,
                 cwd=cwd,
                 env=self._subprocess_env(),
-                capture_output=True,
-                text=True,
                 timeout=620,
-                check=False,
             )
             content = self._extract_content(proc.stdout)
             if proc.returncode == 0 and content:
@@ -85,6 +84,8 @@ class OhMyPiTool(AITool):
                 success=False,
                 message=message,
             )
+        except RunCancelled:
+            raise
         except subprocess.TimeoutExpired:
             return AIToolResult(
                 content="",
@@ -147,10 +148,10 @@ class OhMyPiTool(AITool):
         cwd: str,
         model: str | None = None,
     ) -> list[str]:
-        cmd: list[str] = [binary]
+        app_cwd = str(Path(cwd).expanduser().resolve())
+        # 始终显式 --cwd，避免 Warp/临时脚本场景下 Bun process.cwd() EPERM
+        cmd: list[str] = [binary, "--cwd", app_cwd]
         project_root = cls._resolve_omp_project_root(cwd)
-        if project_root is not None:
-            cmd.extend(["--cwd", str(project_root)])
         config_overlay = cls._resolve_omp_config_overlay(cwd, project_root)
         if config_overlay:
             cmd.extend(["--config", config_overlay])

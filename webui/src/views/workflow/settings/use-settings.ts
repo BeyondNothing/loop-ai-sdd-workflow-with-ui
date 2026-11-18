@@ -4,6 +4,7 @@ import { Modal, message } from 'ant-design-vue';
 
 import {
   type AiToolOption,
+  type ConfidenceNodeRules,
   type McpServerItem,
   type NodeRuntimeRow,
   type ProjectBinding,
@@ -18,6 +19,11 @@ export function useSettings() {
   const syncing = ref(false);
   const activeTab = ref('tool');
   const mcpModalOpen = ref(false);
+  const confidencePath = ref('');
+  const confidenceEnginePath = ref('');
+  const confidenceNodes = ref<ConfidenceNodeRules[]>([]);
+  const confidenceEngineNodes = ref<ConfidenceNodeRules[]>([]);
+  const confidenceNodeId = ref('');
   const mcpEditingName = ref('');
   const mcpForm = reactive({
     name: '',
@@ -46,6 +52,10 @@ export function useSettings() {
   const skillName = ref('start-workflow');
   const skillAgents = ref<SkillAgentItem[]>([]);
   const selectedSkillAgents = ref<string[]>([]);
+  const probing = ref(false);
+  const probeResult = ref<Awaited<
+    ReturnType<typeof workflowApi.probeConnectivity>
+  > | null>(null);
 
   const projectOptions = computed(() =>
     projects.value.map((p) => ({ label: `${p.name} (${p.project_id})`, value: p.project_id })),
@@ -103,12 +113,110 @@ export function useSettings() {
     }
   }
 
+  async function loadConfidenceRules() {
+    const data = await workflowApi.getConfidenceRules(
+      selectedProjectId.value || undefined,
+    );
+    confidencePath.value = data.path || '';
+    confidenceEnginePath.value = data.engine_path || '';
+    confidenceEngineNodes.value = data.engine_nodes || [];
+    // 编辑业务扩展；若业务为空则用引擎节点骨架便于添加扩展规则
+    const business = (data.nodes || []).map((n) => ({
+      ...n,
+      high_confidence_rules: [...(n.high_confidence_rules || [])],
+      low_confidence_rules: [...(n.low_confidence_rules || [])],
+    }));
+    if (business.length) {
+      confidenceNodes.value = business;
+    } else {
+      confidenceNodes.value = (data.engine_nodes || []).map((n) => ({
+        node_id: n.node_id,
+        description: n.description || '',
+        high_confidence_rules: [],
+        low_confidence_rules: [],
+      }));
+    }
+    if (
+      !confidenceNodeId.value ||
+      !confidenceNodes.value.some((n) => n.node_id === confidenceNodeId.value)
+    ) {
+      confidenceNodeId.value = confidenceNodes.value[0]?.node_id || '';
+    }
+  }
+
+  const confidenceNodeOptions = computed(() =>
+    confidenceNodes.value.map((n) => ({
+      label: `${n.description || n.node_id} (${n.node_id})`,
+      value: n.node_id,
+    })),
+  );
+
+  const selectedConfidenceNode = computed(() =>
+    confidenceNodes.value.find((n) => n.node_id === confidenceNodeId.value),
+  );
+
+  const engineRulesForSelected = computed(() =>
+    confidenceEngineNodes.value.find((n) => n.node_id === confidenceNodeId.value),
+  );
+
+  function addConfidenceRule(kind: 'high' | 'low') {
+    const node = selectedConfidenceNode.value;
+    if (!node) return;
+    const list =
+      kind === 'high' ? node.high_confidence_rules : node.low_confidence_rules;
+    list.push({ condition: '', reason: '' });
+  }
+
+  function removeConfidenceRule(kind: 'high' | 'low', index: number) {
+    const node = selectedConfidenceNode.value;
+    if (!node) return;
+    const list =
+      kind === 'high' ? node.high_confidence_rules : node.low_confidence_rules;
+    list.splice(index, 1);
+  }
+
+  async function saveConfidenceRules() {
+    saving.value = true;
+    try {
+      const data = await workflowApi.updateConfidenceRules({
+        project_id: selectedProjectId.value || undefined,
+        nodes: confidenceNodes.value.map((n) => ({
+          node_id: n.node_id,
+          description: n.description,
+          high_confidence_rules: (n.high_confidence_rules || []).filter((r) =>
+            r.condition.trim(),
+          ),
+          low_confidence_rules: (n.low_confidence_rules || []).filter((r) =>
+            r.condition.trim(),
+          ),
+        })),
+      });
+      confidencePath.value = data.path;
+      confidenceNodes.value = (data.nodes || []).map((n) => ({
+        ...n,
+        high_confidence_rules: [...(n.high_confidence_rules || [])],
+        low_confidence_rules: [...(n.low_confidence_rules || [])],
+      }));
+      confidenceEngineNodes.value = data.engine_nodes || [];
+      message.success('置信度扩展规则已写入业务 suggestion-confidence-rules.yaml');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      saving.value = false;
+    }
+  }
+
   async function loadAll() {
     loading.value = true;
     try {
       await loadProjects();
       await loadBase();
-      await Promise.all([loadNodeSettings(), loadMcp(), loadSkills()]);
+      await Promise.all([
+        loadNodeSettings(),
+        loadMcp(),
+        loadSkills(),
+        loadConfidenceRules(),
+      ]);
     } catch (e) {
       message.error(String(e));
     } finally {
@@ -118,8 +226,9 @@ export function useSettings() {
 
   async function onProjectChange() {
     loading.value = true;
+    probeResult.value = null;
     try {
-      await Promise.all([loadNodeSettings(), loadSkills()]);
+      await Promise.all([loadNodeSettings(), loadSkills(), loadConfidenceRules()]);
     } catch (e) {
       message.error(String(e));
     } finally {
@@ -280,7 +389,12 @@ export function useSettings() {
     syncing.value = true;
     try {
       await workflowApi.initProjectSettings(selectedProjectId.value || undefined);
-      await Promise.all([loadNodeSettings(), loadSkills(), loadMcp()]);
+      await Promise.all([
+        loadNodeSettings(),
+        loadSkills(),
+        loadMcp(),
+        loadConfidenceRules(),
+      ]);
       message.success('已初始化业务配置 + skill + MCP 同步');
     } catch (e) {
       message.error(String(e));
@@ -289,12 +403,39 @@ export function useSettings() {
     }
   }
 
+  async function probeConnectivity() {
+    probing.value = true;
+    try {
+      probeResult.value = await workflowApi.probeConnectivity(
+        selectedProjectId.value || undefined,
+      );
+      if (probeResult.value.ok) {
+        message.success('连通探测通过');
+      } else {
+        message.warning(
+          `探测未完全通过：MCP ${probeResult.value.mcp.summary} · Skill ${probeResult.value.skills.summary}`,
+        );
+      }
+    } catch (e) {
+      probeResult.value = null;
+      message.error(String(e));
+    } finally {
+      probing.value = false;
+    }
+  }
+
   onMounted(loadAll);
 
   return {
     activeTab,
+    addConfidenceRule,
+    confidenceEnginePath,
+    confidenceNodeId,
+    confidenceNodeOptions,
+    confidencePath,
     defaultTool,
     deleteMcp,
+    engineRulesForSelected,
     initProject,
     installSkills,
     loading,
@@ -308,12 +449,18 @@ export function useSettings() {
     nodeRows,
     onProjectChange,
     openMcpModal,
+    probeConnectivity,
+    probeResult,
+    probing,
     projectOptions,
     projects,
+    removeConfidenceRule,
+    saveConfidenceRules,
     saveDefaultTool,
     saveMcp,
     saveNodeSettings,
     saving,
+    selectedConfidenceNode,
     selectedProjectId,
     selectedSkillAgents,
     skillAgents,

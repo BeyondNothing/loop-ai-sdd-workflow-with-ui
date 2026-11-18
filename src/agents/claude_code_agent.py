@@ -40,13 +40,12 @@ class ClaudeCodeTool(AITool):
         for binary in ("claude", "claude-code"):
             cmd = [binary, "--print", *_PERMISSION_FLAGS, *model_flags, launch]
             try:
-                proc = subprocess.run(
+                from ..run_control import RunCancelled, run_cancellable_subprocess
+
+                proc = run_cancellable_subprocess(
                     cmd,
                     cwd=cwd,
-                    capture_output=True,
-                    text=True,
                     timeout=600,
-                    check=False,
                 )
                 if proc.returncode == 0 and proc.stdout.strip():
                     return AIToolResult(
@@ -56,6 +55,8 @@ class ClaudeCodeTool(AITool):
                     )
                 if proc.stderr:
                     logger.warning("Claude Code stderr: %s", proc.stderr[:500])
+            except RunCancelled:
+                raise
             except FileNotFoundError:
                 continue
             except subprocess.TimeoutExpired:

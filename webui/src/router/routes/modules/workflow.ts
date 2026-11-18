@@ -14,12 +14,22 @@ const routes: RouteRecordRaw[] = [
     },
   },
   {
+    name: 'WorkflowMetrics',
+    path: '/metrics',
+    component: () => import('#/views/workflow/metrics/index.vue'),
+    meta: {
+      icon: 'lucide:bar-chart-3',
+      order: 2,
+      title: $t('page.workflow.metrics'),
+    },
+  },
+  {
     name: 'WorkflowSettings',
     path: '/settings',
     component: () => import('#/views/workflow/settings/index.vue'),
     meta: {
       icon: 'lucide:settings',
-      order: 2,
+      order: 3,
       title: $t('page.workflow.settings'),
     },
   },

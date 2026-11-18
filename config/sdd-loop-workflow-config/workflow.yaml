@@ -5,43 +5,43 @@ docs_dir: spec
 # 调低则更多项自动采纳、更少打断，调高则更多项需用户确认。
 
 defaults:
-  tool: claude_code
+  tool: omp
   model: ""
 
 nodes:
   analyze_requirements:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   create_plan:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   design_test_cases:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   review_plan:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   split_tasks:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   implement_code:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   verify_tests:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   ai_review:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8
   commit_code:
-    tool: claude_code
+    tool: omp
     model: ""
     recommendation_threshold: 0.8

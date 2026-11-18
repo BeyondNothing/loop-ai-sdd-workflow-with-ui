@@ -13,13 +13,13 @@ workflow:
 
 # 引擎级默认（可被业务 sdd-loop-workflow-config/workflow.yaml 覆盖）
 defaults:
-  tool: claude_code
+  tool: omp
   # model: ""
 
 nodes:
   analyze_requirements:
     name: 需求分析与澄清
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/01_requirements.md
     prompt_auto: prompts/01_requirements.auto.md
@@ -30,7 +30,7 @@ nodes:
 
   create_plan:
     name: 制定计划
-    tool: claude_code
+    tool: omp
     mode: headless
     prompt: prompts/02_create_plan.md
     prompt_auto: prompts/02_create_plan.auto.md
@@ -45,7 +45,7 @@ nodes:
 
   design_test_cases:
     name: 设计测试用例
-    tool: claude_code
+    tool: omp
     mode: headless
     prompt: prompts/02_design_test_cases.md
     prompt_auto: prompts/02_design_test_cases.auto.md
@@ -59,7 +59,7 @@ nodes:
 
   review_plan:
     name: 计划评审
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/02_review_plan.md
     prompt_auto: prompts/02_review_plan.auto.md
@@ -76,7 +76,7 @@ nodes:
 
   split_tasks:
     name: 任务拆分
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/03_split_tasks.md
     prompt_auto: prompts/03_split_tasks.auto.md
@@ -92,7 +92,7 @@ nodes:
 
   implement_code:
     name: 代码实现
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/04_implement_code.md
     prompt_auto: prompts/04_implement_code.auto.md
@@ -108,7 +108,7 @@ nodes:
 
   verify_tests:
     name: 测试自验证
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/05_verify_tests.md
     prompt_auto: prompts/05_verify_tests.auto.md
@@ -120,7 +120,7 @@ nodes:
 
   ai_review:
     name: AI 代码评审
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/06_ai_review.md
     prompt_auto: prompts/06_ai_review.auto.md
@@ -129,7 +129,7 @@ nodes:
 
   commit_code:
     name: 提交代码
-    tool: claude_code
+    tool: omp
     mode: interactive
     prompt: prompts/07_commit.md
     prompt_auto: prompts/07_commit.auto.md

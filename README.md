@@ -113,6 +113,17 @@ REM Windows — 在 ai4se-sdd-loop-workflow 目录
 
 启动脚本会按需同步 Playwright MCP。`e2e.enabled: false` 时跳过 MCP 同步，E2E 在报告中标 skip。Windows 使用 `scripts/playwright-mcp.cmd`。若浏览器 MCP 未生效，重新跑启动脚本后**重启 IDE / omp 会话**。
 
+### 1.4 Web 操作台（可视化）
+
+不想只跑 CLI 时，用 Web 操作台（项目 / 任务 / 流水线 / 指标）：
+
+```bash
+./start_ui.sh
+# 打开 http://127.0.0.1:8787/#/workbench
+```
+
+完整步骤、开发模式与首次建项目见 **§13**。
+
 ---
 
 ## 2. 设计目标
@@ -509,48 +520,137 @@ ai4se-sdd-loop-workflow/            # 本仓库根
 
 ---
 
-## 13. Web 操作台
+## 13. Web 操作台（怎么启动）
 
-基于 [Vben Admin](https://www.vben.pro)（Vue3 + Ant Design Vue）的可视化工作台，支持项目/任务管理、工作流执行与节点状态追踪。默认免登录，首页直达 `#/workflow/workbench`。
+基于 [Vben Admin](https://www.vben.pro)（Vue3 + Ant Design Vue）的可视化工作台：项目/任务、流水线执行、日志与产物、规则目录、运行指标、系统设置。默认免登录。
 
-### 前置依赖
+### 13.1 前置依赖
 
-- Node.js 20+
-- [pnpm](https://pnpm.io)（`corepack enable` 或安装到 `~/.local/bin`）
+| 依赖 | 要求 |
+|------|------|
+| Python | 3.10+（`python3`） |
+| Node.js | 20+ |
+| pnpm | [`corepack enable`](https://pnpm.io) 或安装到 `PATH`（脚本也会找 `~/.local/bin`） |
+| 可选 CLI | 真实跑节点需要本机已登录的 `omp` / Cursor / Claude 等 |
 
-### 生产模式（推荐）
+仓库可单独 clone 使用（不必嵌在业务工程里）；在操作台「新建项目」里绑定业务工程的 `app_root` 即可。
+
+### 13.2 一键启动（推荐 · 生产模式）
+
+在**本仓库根目录**执行：
 
 ```bash
+git clone https://github.com/BeyondNothing/loop-ai-sdd-workflow-with-ui.git
+cd loop-ai-sdd-workflow-with-ui
+
+# 首次：创建 .venv、安装 Python 包；若无 webui/dist 会自动 pnpm install + build
 ./start_ui.sh
-# 浏览器打开 http://127.0.0.1:8787/#/workbench
 ```
 
-脚本会自动 `pnpm build` 生成 `webui/dist`（若不存在）并由 Python 托管静态资源。
+浏览器打开：
 
-### 开发模式
+```text
+http://127.0.0.1:8787/#/workbench
+```
+
+常用页面：
+
+| 路径 | 说明 |
+|------|------|
+| `#/workbench` | SDD 操作台（项目 / 任务 / 执行） |
+| `#/rule-dirs` | 规则目录（RuleSet） |
+| `#/metrics` | 运行指标（近 N 日耗时 / 失败率 / 卡点） |
+| `#/settings` | 系统设置（工具 / 置信度 / MCP · Skill 连通探测） |
+
+已装过依赖、只想快速拉起：
+
+```bash
+SKIP_INSTALL=1 ./start_ui.sh
+```
+
+改监听地址 / 端口：
+
+```bash
+UI_HOST=0.0.0.0 UI_PORT=8787 ./start_ui.sh
+```
+
+停止：在运行该脚本的终端按 `Ctrl+C`。端口占用时可：
+
+```bash
+lsof -i :8787 -t | xargs kill
+```
+
+### 13.3 首次使用（操作台内）
+
+1. 打开 **SDD 操作台** → 左上角 **+** 新建项目  
+2. 填写名称、业务工程 **根目录 `app_root`**（建议绝对路径；可勾选「目录不存在时创建」「创建后自动初始化」）  
+3. 可选绑定 RuleSet；保存后会同步 `sdd-loop-workflow-config` / Skill / MCP  
+4. 新建任务 → 填需求或选 PRD → 点运行  
+5. 交互节点默认走 **Warp**（macOS）；权限问题见下方「Warp 权限」
+
+### 13.4 开发模式（改前端时）
+
+前后端同时起：API 在 `8787`，Vite 在 `5666` 并代理 `/api`。
 
 ```bash
 ./start_ui_dev.sh
-# 前端 http://127.0.0.1:5666 （Vite 代理 /api → 8787）
+# 前端 http://127.0.0.1:5666
 # 后端 http://127.0.0.1:8787
 ```
 
-### 手动构建
+### 13.5 手动构建 / 仅起后端
 
 ```bash
-cd webui && pnpm install && pnpm build
+# 虚拟环境 + 可编辑安装（与 start_ui.sh 相同）
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .
+
+cd webui && pnpm install && pnpm build && cd ..
 python serve_ui.py --host 127.0.0.1 --port 8787
 ```
 
-### 状态持久化
+前端有改动后需重新 `pnpm build`（或用 `start_ui_dev.sh` 热更新）。
 
-操作台数据保存在 `.dev-workflow/web-ui/`：
+### 13.6 状态持久化
 
-| 文件 | 内容 |
+操作台数据保存在 `.dev-workflow/web-ui/`（已 gitignore）：
+
+| 路径 | 内容 |
 |------|------|
 | `bindings.json` | 项目绑定 |
 | `tasks.json` | 任务列表（含 `last_run_id`） |
-| `runs.json` | 工作流运行记录（重启可恢复） |
+| `runs.json` | 运行记录（重启可恢复） |
+| `runtime/<project_id>/` | 单次 run 的运行时配置副本 |
+
+### Warp 权限（macOS）
+
+操作台在 macOS 上跑**交互节点**时，会打开 **Warp** 新窗口执行 `omp` / 其它 CLI（启动脚本在 `~/.ai4se/warp/`，项目目录通过 `omp --cwd <app_root>` 传入）。
+
+若业务项目在 **`~/Downloads`、`~/Desktop`、`~/Documents`** 下，macOS TCC 常会拦截，典型报错：
+
+```text
+EPERM: operation not permitted
+Cannot change working directory to .../Downloads/...
+grant omp Files & Folders or Full Disk Access
+```
+
+**推荐配置（继续用 Warp，不要改用 Terminal）：**
+
+1. 打开 **系统设置 → 隐私与安全性**
+2. **完全磁盘访问权限（Full Disk Access）** 中添加并开启：
+   - **Warp**（`/Applications/Warp.app`）
+   - **omp**（一般为 `~/.local/bin/omp`；若列表只能选 App，可用「+」选该可执行文件，或给其父级终端环境授权后再试）
+3. 可选：同一页的 **文件和文件夹（Files and Folders）** 里，确认 Warp 对「下载文件夹」等已允许
+4. **完全退出并重启 Warp**（⌘Q 后再开），再在操作台重新执行任务
+5. 若仍失败：把项目移到非受限目录（如 `~/IdeaProjects/your-app`），在操作台更新项目的 `app_root` 绑定
+
+**辅助权限（自动注入命令）：**
+
+- **系统设置 → 隐私与安全性 → 自动化**：允许运行操作台的进程（如 Terminal / Cursor）控制 **Warp**、**System Events**
+- 日志里会出现 `bash ~/.ai4se/warp/ai4se_warp_*.sh`；未自动键入时可在 Warp 中手动粘贴执行
+
+关闭 Warp 桥接（仅调试）：环境变量 `AI4SE_WARP_BRIDGE=0`。
 
 ---
 

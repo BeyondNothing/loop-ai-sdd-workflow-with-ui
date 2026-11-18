@@ -16,6 +16,7 @@
     "title": "SDD 操作台",
     "workbench": "SDD 操作台",
     "ruleDirs": "规则目录",
+    "metrics": "运行指标",
     "settings": "系统设置"
   }
 }

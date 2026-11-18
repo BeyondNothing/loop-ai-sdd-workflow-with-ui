@@ -5,29 +5,43 @@ import { IconifyIcon } from '@vben/icons';
 import {
   Button,
   Empty,
+  Form,
   Input,
   List,
+  Modal,
   Space,
   Tabs,
   Tag,
   Tooltip,
+  Upload,
 } from 'ant-design-vue';
 
 import RuleBindModal from '../workbench/RuleBindModal.vue';
+import PathPickerModal from '../workbench/PathPickerModal.vue';
 import NodeRulesEditor from './NodeRulesEditor.vue';
 import RuleSetCreateModal from './RuleSetCreateModal.vue';
 import { useRuleDirs } from './use-rule-dirs';
+import { ref } from 'vue';
+
+const importFolderPickerOpen = ref(false);
 
 const {
   bindModalOpen,
   confirmDelete,
   createModalOpen,
+  exportRuleSet,
   files,
+  importFileName,
+  importFolder,
+  importModalOpen,
+  importName,
   loading,
   onBindSaved,
+  onImportFileChange,
   onSystemMdInput,
   openBindModal,
   openCreateModal,
+  openImportModal,
   projects,
   refreshAll,
   ruleSets,
@@ -37,6 +51,7 @@ const {
   selectRuleSet,
   selectedId,
   selectedRuleSet,
+  submitImport,
   systemMd,
   systemMdDirty,
   systemMdExists,
@@ -57,6 +72,11 @@ const {
               规则目录
             </span>
             <Space :size="2">
+              <Tooltip title="导入 zip">
+                <Button size="small" type="text" @click="openImportModal">
+                  <IconifyIcon icon="lucide:upload" class="size-3.5" />
+                </Button>
+              </Tooltip>
               <Tooltip title="新建">
                 <Button size="small" type="text" @click="openCreateModal">
                   <IconifyIcon icon="lucide:plus" class="size-3.5" />
@@ -120,6 +140,10 @@ const {
               <Tag :color="selectedRuleSet.exists ? 'success' : 'warning'" class="m-0">
                 {{ selectedRuleSet.exists ? '目录存在' : '目录不存在' }}
               </Tag>
+              <Button :loading="loading" @click="exportRuleSet">
+                <IconifyIcon class="mr-1" icon="lucide:download" />
+                导出
+              </Button>
               <Button @click="openBindModal">
                 <IconifyIcon class="mr-1" icon="lucide:link" />
                 项目绑定
@@ -214,6 +238,56 @@ const {
       :projects="projects"
       :rule-dir="selectedRuleSet"
       @saved="onBindSaved"
+    />
+
+    <Modal
+      v-model:open="importModalOpen"
+      :confirm-loading="loading"
+      ok-text="导入"
+      title="导入 RuleSet zip"
+      @ok="submitImport"
+    >
+      <Form layout="vertical">
+        <Form.Item label="zip 文件" required>
+          <Upload
+            :before-upload="
+              (file) => {
+                onImportFileChange(file as File);
+                return false;
+              }
+            "
+            :max-count="1"
+            accept=".zip"
+            :show-upload-list="false"
+          >
+            <Button>
+              <IconifyIcon class="mr-1" icon="lucide:file-archive" />
+              选择 zip
+            </Button>
+          </Upload>
+          <div class="mt-1 text-xs opacity-45">{{ importFileName || '未选择' }}</div>
+        </Form.Item>
+        <Form.Item label="显示名称">
+          <Input v-model:value="importName" placeholder="可选，默认用 zip 名" />
+        </Form.Item>
+        <Form.Item label="解压到目录" required>
+          <Input.Group compact>
+            <Input
+              v-model:value="importFolder"
+              placeholder="绝对路径"
+              style="width: calc(100% - 72px)"
+            />
+            <Button @click="importFolderPickerOpen = true">浏览</Button>
+          </Input.Group>
+        </Form.Item>
+      </Form>
+    </Modal>
+    <PathPickerModal
+      v-model:open="importFolderPickerOpen"
+      :initial-path="importFolder"
+      mode="dir"
+      title="选择导入目标目录"
+      @select="(p) => (importFolder = p)"
     />
   </Page>
 </template>

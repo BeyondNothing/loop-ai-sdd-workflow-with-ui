@@ -1,4 +1,9 @@
-"""交互式 CLI 公共逻辑 — 轮询产出、自动结束进程组；Web UI 无 TTY 时经 Warp 唤起 omp。"""
+"""交互式 CLI 公共逻辑 — 轮询产出、自动结束进程组；Web UI 无 TTY 时经 Warp 唤起。
+
+macOS：交互节点默认开 Warp 新窗口执行启动脚本。项目若在 Downloads/Desktop/Documents，
+须给 Warp / omp 开启「文稿和数据」或「完全磁盘访问」，否则 omp --cwd 会 EPERM。
+详见 README「Web 操作台 → Warp 权限（macOS）」。
+"""
 
 from __future__ import annotations
 
@@ -85,9 +90,21 @@ def run_interactive_subprocess(
             _emit_run_log(f"Warp 启动失败，回退后台子进程: {exc}")
             logger.warning("Warp bridge launch failed, fallback to local subprocess: %s", exc)
 
+    from ..run_control import (
+        RunCancelled,
+        is_cancel_requested,
+        register_process,
+        unregister_process,
+    )
+
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, start_new_session=True)
+    register_process(proc)
     try:
         while proc.poll() is None:
+            if is_cancel_requested():
+                _emit_run_log("收到取消请求，终止交互 CLI")
+                _stop_process(proc)
+                raise RunCancelled("运行已被用户取消（交互 CLI）")
             if completion_check and completion_check():
                 logger.info("检测到节点产出已完成，结束交互 CLI")
                 print("\n节点产出已完成，自动退出 CLI，workflow 继续…\n")
@@ -102,6 +119,8 @@ def run_interactive_subprocess(
     except KeyboardInterrupt:
         _stop_process(proc)
         raise
+    finally:
+        unregister_process(proc)
 
     return AIToolResult(
         content="",
@@ -121,6 +140,80 @@ def _should_bridge_to_warp(completion_check: CompletionCheck | None) -> bool:
     return not (sys.stdin.isatty() and sys.stdout.isatty())
 
 
+_TCC_SENSITIVE_HOME_DIRS = frozenset({"Downloads", "Desktop", "Documents"})
+
+
+def _warp_launcher_dir() -> Path:
+    path = Path.home() / ".ai4se" / "warp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cleanup_warp_launchers(out_dir: Path, *, keep: int = 20) -> None:
+    """只保留最近 keep 个启动脚本，避免 ~/.ai4se/warp 无限堆积。"""
+    patterns = ("ai4se_warp_*.sh", "ai4se_warp_*.command")
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(out_dir.glob(pattern))
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    for old in files[keep:]:
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _is_tcc_sensitive_path(path: Path) -> bool:
+    """Downloads/Desktop/Documents 下路径：Warp 内 omp --cwd 极易 EPERM。"""
+    try:
+        resolved = path.expanduser().resolve()
+        rel = resolved.relative_to(Path.home().resolve())
+    except (ValueError, OSError, RuntimeError):
+        return False
+    return bool(rel.parts) and rel.parts[0] in _TCC_SENSITIVE_HOME_DIRS
+
+
+def _wait_external_interactive(
+    *,
+    tool_name: str,
+    completion_check: CompletionCheck,
+    label: str,
+) -> AIToolResult:
+    from ..run_control import RunCancelled, emit_progress, is_cancel_requested
+
+    start = time.time()
+    last_heartbeat = 0.0
+    while True:
+        if is_cancel_requested():
+            _emit_run_log(f"收到取消请求，停止等待 {label} 交互产出")
+            raise RunCancelled(f"运行已被用户取消（{label} 等待）")
+        if completion_check():
+            return AIToolResult(
+                content="",
+                tool_name=tool_name,
+                success=True,
+                message=f"已在 {label} 启动交互会话",
+            )
+        elapsed = time.time() - start
+        if elapsed > _WARP_LAUNCH_TIMEOUT_SECONDS:
+            return AIToolResult(
+                content="",
+                tool_name=tool_name,
+                success=False,
+                message=f"{label} 交互会话超时，未检测到节点产出",
+            )
+        if elapsed - last_heartbeat >= 5.0:
+            last_heartbeat = elapsed
+            emit_progress(
+                {
+                    "phase": "heartbeat",
+                    "elapsed_ms": int(elapsed * 1000),
+                    "current_node": tool_name,
+                }
+            )
+        time.sleep(_POLL_SECONDS)
+
+
 def _run_interactive_via_warp_window(
     *,
     cmd: list[str],
@@ -129,49 +222,59 @@ def _run_interactive_via_warp_window(
     completion_check: CompletionCheck,
     env: dict[str, str] | None,
 ) -> AIToolResult:
-    launch_uri = f"warp://action/new_window?path={quote(str(Path(cwd).resolve()))}"
+    # Warp 窗口开在 ~/.ai4se/warp；业务根靠 omp --cwd（勿把 shell cwd 直接放 Downloads）
+    workdir = Path(cwd).expanduser().resolve()
+    safe_dir = _warp_launcher_dir()
+    launch_uri = f"warp://action/new_window?path={quote(str(safe_dir))}"
     subprocess.run(["open", launch_uri], check=False)
     time.sleep(1.0)
     launcher = _write_warp_launcher_script(cmd, cwd, env)
     logger.info("Warp 启动脚本已生成: %s", launcher)
-    _emit_run_log(f"已在 Warp 新窗口注入启动脚本: {launcher}")
-    _emit_run_log(f"若未自动唤起，可在 Warp 中手动执行: {shlex_quote(str(launcher))}")
+    _emit_run_log(f"Warp 启动脚本已生成: {launcher}")
+    _emit_run_log(f"Warp 窗口工作目录: {safe_dir}")
+    if _is_tcc_sensitive_path(workdir):
+        _emit_run_log(
+            "提示: 项目在 Downloads/Desktop/Documents。"
+            "若 omp 报 EPERM，请按 README「Warp 权限（macOS）」给 Warp/omp 开磁盘访问后重试。"
+        )
     print(f"[warp] 新窗口已打开，正在注入启动脚本: {launcher}", flush=True)
-    _send_command_to_frontmost_warp(shlex_quote(str(launcher)))
+    launch_cmd = f"bash {shlex_quote(str(launcher))}"
+    _emit_run_log(f"若未自动唤起，可在 Warp 中手动执行: {launch_cmd}")
+    try:
+        _send_command_to_frontmost_warp(launch_cmd)
+        _emit_run_log(f"已向 Warp 注入启动命令: {launch_cmd}")
+    except Exception as exc:  # noqa: BLE001
+        _emit_run_log(f"Warp 自动键入失败（请手动执行）: {exc}")
+        logger.warning("Warp osascript inject failed: %s", exc)
 
-    start = time.time()
-    while True:
-        if completion_check():
-            return AIToolResult(
-                content="",
-                tool_name=tool_name,
-                success=True,
-                message="已在 Warp 新窗口启动交互会话",
-            )
-        if time.time() - start > _WARP_LAUNCH_TIMEOUT_SECONDS:
-            return AIToolResult(
-                content="",
-                tool_name=tool_name,
-                success=False,
-                message="Warp 交互会话超时，未检测到节点产出",
-            )
-        time.sleep(_POLL_SECONDS)
+    return _wait_external_interactive(
+        tool_name=tool_name,
+        completion_check=completion_check,
+        label="Warp",
+    )
 
 
 def _write_warp_launcher_script(
     cmd: list[str],
     cwd: str,
     env: dict[str, str] | None,
+    *,
+    shell_cwd: Path | None = None,
 ) -> Path:
-    fd, path = tempfile.mkstemp(prefix="ai4se_warp_", suffix=".sh")
+    # 脚本文件仍落在 ~/.ai4se/warp；shell_cwd 可指向项目根（Terminal）或安全目录（Warp）
+    workdir = Path(cwd).expanduser().resolve()
+    out_dir = _warp_launcher_dir()
+    _cleanup_warp_launchers(out_dir, keep=20)
+    run_cwd = (shell_cwd or out_dir).expanduser().resolve()
+    fd, path = tempfile.mkstemp(prefix="ai4se_warp_", suffix=".sh", dir=str(out_dir))
     launcher = Path(path)
     try:
         lines = [
             "#!/usr/bin/env bash",
-            "set -e",
-            "trap 'rm -f -- \"$0\"' EXIT",
+            "set -euo pipefail",
+            f"cd {shlex_quote(str(run_cwd))}",
+            f"export PWD={shlex_quote(str(run_cwd))}",
         ]
-        lines.append(f"cd {shlex_quote(str(Path(cwd).resolve()))}")
 
         if env:
             for key in ("OMP_MCP_TIMEOUT_MS", "PATH"):
@@ -179,11 +282,21 @@ def _write_warp_launcher_script(
                 if value:
                     lines.append(f"export {key}={shlex_quote(value)}")
 
-        lines.append(" ".join(shlex_quote(part) for part in cmd))
+        lines.append(f"# project app_root: {workdir}")
+        lines.append("exec " + " ".join(shlex_quote(part) for part in cmd))
         os.write(fd, ("\n".join(lines) + "\n").encode("utf-8"))
     finally:
         os.close(fd)
     launcher.chmod(0o700)
+    try:
+        subprocess.run(
+            ["xattr", "-c", str(launcher)],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
     return launcher
 
 
@@ -195,12 +308,16 @@ def _send_command_to_frontmost_warp(command_line: str) -> None:
         "key code 36",
         "end tell",
     ]
-    result = subprocess.run(
-        ["osascript", *sum([["-e", line] for line in script], [])],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["osascript", *sum([["-e", line] for line in script], [])],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("osascript 向 Warp 注入命令超时（15s）") from exc
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "osascript failed").strip())
 

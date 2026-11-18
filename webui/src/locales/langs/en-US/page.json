@@ -16,6 +16,7 @@
     "title": "SDD Workbench",
     "workbench": "Task Workbench",
     "ruleDirs": "Rule Directories",
+    "metrics": "Run Metrics",
     "settings": "System Settings"
   }
 }

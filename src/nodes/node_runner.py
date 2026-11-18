@@ -81,9 +81,6 @@ def build_suggestion_confidence_prompt(
     return "\n".join(lines)
 
 _PHASE_NODE_IDS = frozenset(PHASE_CONFIGS.keys())
-_CODE_WORK_NODES = frozenset(
-    {"implement_code", "verify_tests", "ai_review", "commit_code"}
-)
 
 
 class NodeRunner:
@@ -94,6 +91,16 @@ class NodeRunner:
         self.prompts_dir = project_root / "prompts"
 
     def run_node(self, node_id: str, state: DevWorkflowState) -> DevWorkflowState:
+        from ..run_control import emit_progress, raise_if_cancelled
+
+        raise_if_cancelled(f"进入节点前 {node_id}")
+        emit_progress(
+            {
+                "phase": "enter",
+                "current_node": node_id,
+                "docs_dir": state.get("docs_dir") or "",
+            }
+        )
         node_cfg = self.workflow_config.nodes[node_id]
         docs_dir = self._resolve_docs_dir(state)
 
@@ -235,6 +242,17 @@ class NodeRunner:
         if not result.success:
             updates["last_error"] = result.message or f"{node_cfg.tool} 执行未完全成功"
 
+        emit_progress(
+            {
+                "phase": "leave",
+                "current_node": node_id,
+                "docs_dir": state.get("docs_dir") or "",
+                "node_outputs": dict(updates.get("node_outputs") or {}),
+                "completed_nodes": list(updates.get("completed_nodes") or []),
+                "last_error": updates.get("last_error") or "",
+                "success": bool(result.success),
+            }
+        )
         return updates
 
     def _resolve_interactive_content(
@@ -519,10 +537,8 @@ class NodeRunner:
         return resolve_docs_path(app_root, docs_dir)
 
     def _agent_cwd(self, node_id: str) -> Path:
-        """实现/测试节点在应用项目根执行；其余在本仓库（编排引擎）根目录。"""
-        if node_id in _CODE_WORK_NODES:
-            return self.app_root
-        return self.project_root
+        """Agent 一律在业务项目根（app_root）执行，避免多项目绑定时跑进编排仓库。"""
+        return self.app_root
 
     def _load_prompt(self, prompt_file: str) -> str:
         path = self.project_root / prompt_file

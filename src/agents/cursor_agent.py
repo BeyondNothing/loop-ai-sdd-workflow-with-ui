@@ -52,18 +52,17 @@ class CursorTool(AITool):
         for binary in self._resolve_binaries():
             cmd = [binary, *cli_flags]
             try:
+                from ..run_control import RunCancelled, run_cancellable_subprocess
+
                 logger.info(
                     "调用 Cursor CLI (headless): %s model=%s",
                     binary,
                     model or "(default)",
                 )
-                proc = subprocess.run(
+                proc = run_cancellable_subprocess(
                     cmd,
                     cwd=cwd,
-                    capture_output=True,
-                    text=True,
                     timeout=600,
-                    check=False,
                 )
                 if proc.returncode == 0 and proc.stdout.strip():
                     return AIToolResult(
@@ -73,6 +72,8 @@ class CursorTool(AITool):
                     )
                 if proc.stderr:
                     logger.warning("Cursor CLI stderr: %s", proc.stderr[:500])
+            except RunCancelled:
+                raise
             except FileNotFoundError:
                 continue
             except subprocess.TimeoutExpired:

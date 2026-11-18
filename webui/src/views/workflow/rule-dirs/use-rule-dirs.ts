@@ -21,6 +21,11 @@ export function useRuleDirs() {
   const systemMdExists = ref(false);
   const systemMdDirty = ref(false);
   const savingSystemMd = ref(false);
+  const importModalOpen = ref(false);
+  const importFolder = ref('');
+  const importName = ref('');
+  const importZipBase64 = ref('');
+  const importFileName = ref('');
 
   const selectedRuleSet = computed(
     () => ruleSets.value.find((item) => item.rule_set_id === selectedId.value) || null,
@@ -168,6 +173,79 @@ export function useRuleDirs() {
     });
   }
 
+  async function exportRuleSet() {
+    if (!selectedRuleSet.value) return;
+    loading.value = true;
+    try {
+      const { blob, filename } = await workflowApi.exportRuleSet(
+        selectedRuleSet.value.rule_set_id,
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      message.success('已导出 zip');
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  function openImportModal() {
+    importModalOpen.value = true;
+    importFolder.value = '';
+    importName.value = '';
+    importZipBase64.value = '';
+    importFileName.value = '';
+  }
+
+  async function onImportFileChange(file: File) {
+    importFileName.value = file.name;
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    bytes.forEach((b) => {
+      binary += String.fromCharCode(b);
+    });
+    importZipBase64.value = btoa(binary);
+    if (!importName.value) {
+      importName.value = file.name.replace(/\.zip$/i, '').replace(/\.ruleset$/i, '');
+    }
+  }
+
+  async function submitImport() {
+    if (!importZipBase64.value) {
+      message.warning('请选择 zip 文件');
+      return;
+    }
+    if (!importFolder.value.trim()) {
+      message.warning('请填写导入目标目录');
+      return;
+    }
+    loading.value = true;
+    try {
+      const data = await workflowApi.importRuleSet({
+        zip_base64: importZipBase64.value,
+        folder_path: importFolder.value.trim(),
+        name: importName.value.trim() || undefined,
+        create_folder: true,
+      });
+      message.success(`已导入 ${data.file_count} 个文件`);
+      importModalOpen.value = false;
+      await refreshAll();
+      if (data.rule_set?.rule_set_id) {
+        selectRuleSet(data.rule_set.rule_set_id);
+      }
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      loading.value = false;
+    }
+  }
+
   onMounted(async () => {
     await refreshAll();
   });
@@ -176,12 +254,19 @@ export function useRuleDirs() {
     bindModalOpen,
     confirmDelete,
     createModalOpen,
+    exportRuleSet,
     files,
+    importFileName,
+    importFolder,
+    importModalOpen,
+    importName,
     loading,
     onBindSaved,
+    onImportFileChange,
     onSystemMdInput,
     openBindModal,
     openCreateModal,
+    openImportModal,
     projects,
     refreshAll,
     ruleSets,
@@ -191,6 +276,7 @@ export function useRuleDirs() {
     selectRuleSet,
     selectedId,
     selectedRuleSet,
+    submitImport,
     systemMd,
     systemMdDirty,
     systemMdExists,

@@ -74,6 +74,8 @@ class CodexTool(AITool):
             launch,
         ]
         try:
+            from ..run_control import RunCancelled, run_cancellable_subprocess
+
             logger.info(
                 "调用 Codex CLI (headless): %s model=%s -C=%s launch=%s",
                 binary,
@@ -81,13 +83,10 @@ class CodexTool(AITool):
                 workspace,
                 launch,
             )
-            proc = subprocess.run(
+            proc = run_cancellable_subprocess(
                 cmd,
                 cwd=str(workspace),
-                capture_output=True,
-                text=True,
                 timeout=600,
-                check=False,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 return AIToolResult(
@@ -104,6 +103,8 @@ class CodexTool(AITool):
                 message=(proc.stderr or "").strip()
                 or f"Codex CLI 退出码 {proc.returncode}",
             )
+        except RunCancelled:
+            raise
         except subprocess.TimeoutExpired:
             return AIToolResult(
                 content="",

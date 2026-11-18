@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,14 @@ import yaml
 
 from .agents.registry import list_ai_tools
 from .cli import AGENT_SKILL_DIRS, SKILL_NAME, install_app_config, install_skills, skill_template_path
-from .config_loader import APP_CONFIG_DIR_NAME, APP_WORKFLOW_CONFIG_FILENAME
+from .config_loader import (
+    APP_CONFIG_DIR_NAME,
+    APP_WORKFLOW_CONFIG_FILENAME,
+    SUGGESTION_CONFIDENCE_RULES_FILENAME,
+    NodeScoringRules,
+    _load_scoring_rules_file,
+    load_suggestion_confidence_rules,
+)
 from .mcp.cli_sync import ensure_mcp_for_agents
 from .mcp.config import DEFAULT_SERVERS_PATH, load_cli_mcp_servers
 
@@ -404,3 +413,288 @@ def init_project(engine_root: Path, app_root: Path) -> dict[str, Any]:
         "node_config": get_node_runtime_config(engine_root, app_root),
         "skills": list_skills(engine_root, app_root),
     }
+
+
+def _probe_url(url: str, *, timeout: float = 3.0) -> dict[str, Any]:
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return {"ok": True, "status": int(getattr(resp, "status", 200) or 200)}
+    except urllib.error.HTTPError as exc:
+        # 不少 MCP HTTP 端点不支持 HEAD，4xx 也说明可达
+        return {"ok": True, "status": int(exc.code), "note": "HTTPError"}
+    except Exception as exc:  # noqa: BLE001
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                return {"ok": True, "status": int(getattr(resp, "status", 200) or 200)}
+        except Exception as exc2:  # noqa: BLE001
+            return {"ok": False, "error": str(exc2 or exc)}
+
+
+def probe_connectivity(engine_root: Path, app_root: Path) -> dict[str, Any]:
+    """轻量探测：不拉起长驻 MCP 进程，只检查可执行文件/脚本/URL/Skill 文件。"""
+    engine_root = engine_root.expanduser().resolve()
+    app_root = app_root.expanduser().resolve()
+    listed = list_mcp_servers(engine_root)
+    mcp_items: list[dict[str, Any]] = []
+    for server in listed.get("servers") or []:
+        name = str(server.get("name") or "")
+        enabled = bool(server.get("enabled", True))
+        command = str(server.get("command") or "").strip()
+        wrapper = str(server.get("wrapper") or "").strip()
+        url = str(server.get("url") or "").strip()
+        detail: dict[str, Any] = {
+            "name": name,
+            "enabled": enabled,
+            "ok": False,
+            "checks": [],
+        }
+        if not enabled:
+            detail["ok"] = True
+            detail["skipped"] = True
+            detail["message"] = "已禁用，跳过"
+            mcp_items.append(detail)
+            continue
+
+        all_ok = True
+        if url:
+            url_probe = _probe_url(url)
+            detail["checks"].append({"type": "url", "target": url, **url_probe})
+            all_ok = all_ok and bool(url_probe.get("ok"))
+        if wrapper:
+            wrapper_path = Path(wrapper)
+            if not wrapper_path.is_absolute():
+                wrapper_path = (engine_root / wrapper).resolve()
+            exists = wrapper_path.is_file()
+            detail["checks"].append(
+                {
+                    "type": "wrapper",
+                    "target": str(wrapper_path),
+                    "ok": exists,
+                    "error": None if exists else "脚本不存在",
+                }
+            )
+            all_ok = all_ok and exists
+        if command:
+            which = shutil.which(command)
+            cmd_path = Path(command)
+            ok_cmd = bool(which) or cmd_path.is_file()
+            detail["checks"].append(
+                {
+                    "type": "command",
+                    "target": which or str(cmd_path),
+                    "ok": ok_cmd,
+                    "error": None if ok_cmd else f"PATH 中找不到: {command}",
+                }
+            )
+            all_ok = all_ok and ok_cmd
+        if not (url or wrapper or command):
+            detail["checks"].append(
+                {"type": "config", "ok": False, "error": "缺少 command/wrapper/url"}
+            )
+            all_ok = False
+        detail["ok"] = all_ok
+        detail["message"] = "就绪" if all_ok else "异常"
+        mcp_items.append(detail)
+
+    # 业务根 Agent MCP 落盘情况（同步后应存在）
+    agent_files = [
+        app_root / ".omp" / "mcp.json",
+        app_root / ".cursor" / "mcp.json",
+        app_root / ".mcp.json",
+    ]
+    agent_sync = [
+        {
+            "path": str(p),
+            "ok": p.is_file(),
+            "message": "已同步" if p.is_file() else "未找到（可点「同步到项目」）",
+        }
+        for p in agent_files
+    ]
+
+    skills = list_skills(engine_root, app_root)
+    skill_items: list[dict[str, Any]] = []
+    template = Path(str(skills.get("template_path") or ""))
+    template_ok = template.is_file()
+    template_size = template.stat().st_size if template_ok else 0
+    for agent in skills.get("agents") or []:
+        path = Path(str(agent.get("path") or ""))
+        installed = path.is_file()
+        size = path.stat().st_size if installed else 0
+        empty = installed and size == 0
+        skill_items.append(
+            {
+                "agent": agent.get("agent"),
+                "tool": agent.get("tool"),
+                "path": str(path),
+                "installed": installed,
+                "ok": installed and not empty,
+                "size": size,
+                "stale_hint": bool(
+                    installed and template_ok and size != template_size and template_size > 0
+                ),
+                "message": (
+                    "已安装"
+                    if installed and not empty
+                    else ("文件为空" if empty else "未安装")
+                ),
+            }
+        )
+
+    mcp_ok = all(item.get("ok") for item in mcp_items) if mcp_items else True
+    skill_ok = all(item.get("ok") for item in skill_items) if skill_items else False
+    return {
+        "app_root": str(app_root),
+        "engine_root": str(engine_root),
+        "mcp": {
+            "ok": mcp_ok,
+            "path": listed.get("path"),
+            "servers": mcp_items,
+            "agent_sync": agent_sync,
+            "summary": (
+                f"{sum(1 for i in mcp_items if i.get('ok'))}/{len(mcp_items)} 就绪"
+            ),
+        },
+        "skills": {
+            "ok": skill_ok and template_ok,
+            "skill_name": skills.get("skill_name"),
+            "template_exists": template_ok,
+            "template_path": str(template),
+            "agents": skill_items,
+            "summary": (
+                f"{sum(1 for i in skill_items if i.get('ok'))}/{len(skill_items)} 已安装"
+            ),
+        },
+        "ok": mcp_ok and skill_ok and template_ok,
+    }
+
+
+def _serialize_scoring_rules(rules: dict[str, NodeScoringRules]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for node_id in NODE_ORDER:
+        item = rules.get(node_id)
+        if item is None:
+            continue
+        rows.append(
+            {
+                "node_id": node_id,
+                "description": item.description or "",
+                "high_confidence_rules": [
+                    {"condition": r.condition, "reason": r.reason}
+                    for r in item.high_confidence_rules
+                ],
+                "low_confidence_rules": [
+                    {"condition": r.condition, "reason": r.reason}
+                    for r in item.low_confidence_rules
+                ],
+            }
+        )
+    # 附带 NODE_ORDER 之外的节点
+    for node_id, item in rules.items():
+        if node_id in NODE_ORDER:
+            continue
+        rows.append(
+            {
+                "node_id": node_id,
+                "description": item.description or "",
+                "high_confidence_rules": [
+                    {"condition": r.condition, "reason": r.reason}
+                    for r in item.high_confidence_rules
+                ],
+                "low_confidence_rules": [
+                    {"condition": r.condition, "reason": r.reason}
+                    for r in item.low_confidence_rules
+                ],
+            }
+        )
+    return rows
+
+
+def get_confidence_rules(engine_root: Path, app_root: Path) -> dict[str, Any]:
+    engine_path = engine_root / "config" / SUGGESTION_CONFIDENCE_RULES_FILENAME
+    business_path = _app_config_dir(app_root) / SUGGESTION_CONFIDENCE_RULES_FILENAME
+    engine_rules = _load_scoring_rules_file(engine_path)
+    business_rules = _load_scoring_rules_file(business_path)
+    merged = load_suggestion_confidence_rules(app_root, engine_root)
+    return {
+        "app_root": str(app_root.resolve()),
+        "engine_path": str(engine_path),
+        "path": str(business_path),
+        "exists": business_path.is_file(),
+        "engine_nodes": _serialize_scoring_rules(engine_rules),
+        "nodes": _serialize_scoring_rules(business_rules),
+        "merged_nodes": _serialize_scoring_rules(merged),
+        "node_order": list(NODE_ORDER),
+    }
+
+
+def update_confidence_rules(
+    engine_root: Path,
+    app_root: Path,
+    nodes_payload: list[dict[str, Any]] | dict[str, Any],
+) -> dict[str, Any]:
+    """只写业务根 suggestion-confidence-rules.yaml（项目扩展，不改引擎基线）。"""
+    ensure_project_config(engine_root, app_root)
+    business_path = _app_config_dir(app_root) / SUGGESTION_CONFIDENCE_RULES_FILENAME
+
+    items: list[Any]
+    if isinstance(nodes_payload, list):
+        items = nodes_payload
+    elif isinstance(nodes_payload, dict):
+        raw_nodes = nodes_payload.get("nodes", nodes_payload)
+        if isinstance(raw_nodes, list):
+            items = raw_nodes
+        elif isinstance(raw_nodes, dict):
+            items = [
+                {"node_id": k, **(v if isinstance(v, dict) else {})}
+                for k, v in raw_nodes.items()
+            ]
+        else:
+            items = []
+    else:
+        items = []
+
+    nodes_out: dict[str, Any] = {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        high: list[dict[str, str]] = []
+        for rule in raw.get("high_confidence_rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            condition = str(rule.get("condition") or "").strip()
+            if not condition:
+                continue
+            high.append(
+                {
+                    "condition": condition,
+                    "reason": str(rule.get("reason") or "").strip(),
+                }
+            )
+        low: list[dict[str, str]] = []
+        for rule in raw.get("low_confidence_rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            condition = str(rule.get("condition") or "").strip()
+            if not condition:
+                continue
+            low.append(
+                {
+                    "condition": condition,
+                    "reason": str(rule.get("reason") or "").strip(),
+                }
+            )
+        entry: dict[str, Any] = {
+            "description": str(raw.get("description") or "").strip(),
+            "high_confidence_rules": high,
+            "low_confidence_rules": low,
+        }
+        if entry["description"] or high or low:
+            nodes_out[node_id] = entry
+
+    _write_yaml(business_path, {"nodes": nodes_out})
+    return get_confidence_rules(engine_root, app_root)
