@@ -221,8 +221,20 @@ export function useWorkbench() {
   );
 
   const canRetrySelected = computed(() =>
-    ['completed', 'failed', 'cancelled'].includes(selectedRun.value?.status || ''),
+    ['completed', 'failed', 'cancelled', 'interrupted'].includes(
+      selectedRun.value?.status || '',
+    ),
   );
+
+  function isServerInterruptedRun(run: { status?: string; error?: string } | null) {
+    if (!run) return false;
+    if (run.status === 'interrupted') return true;
+    // 兼容旧数据：重启收尸曾标成 cancelled
+    return (
+      run.status === 'cancelled' &&
+      /server restarted|orphaned|服务重启|运行中断/i.test(run.error || '')
+    );
+  }
 
   function statusColor(status: NodeStatus | string) {
     const map: Record<string, string> = {
@@ -233,8 +245,21 @@ export function useWorkbench() {
       skipped: 'warning',
       cancelling: 'warning',
       cancelled: 'default',
+      interrupted: 'warning',
     };
     return map[status] || 'default';
+  }
+
+  function statusLabel(run: { status?: string; error?: string } | null) {
+    if (!run?.status) return '';
+    if (isServerInterruptedRun(run)) return '中断（可续跑）';
+    if (run.status === 'cancelled') return '已取消';
+    if (run.status === 'failed') return '失败';
+    if (run.status === 'completed') return '完成';
+    if (run.status === 'running') return '运行中';
+    if (run.status === 'queued') return '排队';
+    if (run.status === 'cancelling') return '取消中';
+    return run.status;
   }
 
   function deriveNodeStatuses(run: WorkflowRun | null) {
@@ -252,7 +277,11 @@ export function useWorkbench() {
       if (run?.status === 'completed') {
         status =
           outputs[node.id] || completed.has(node.id) ? 'completed' : 'skipped';
-      } else if (run?.status === 'failed') {
+      } else if (
+        run?.status === 'failed' ||
+        run?.status === 'cancelled' ||
+        run?.status === 'interrupted'
+      ) {
         if (outputs[node.id] || completed.has(node.id)) status = 'completed';
         else if (currentNode === node.id) status = 'failed';
       } else if (run?.status === 'running') {
@@ -445,7 +474,7 @@ export function useWorkbench() {
       syncSelectedRun();
     }
     const fromActive = ['queued', 'running', 'cancelling'].includes(prevStatus);
-    const toTerminal = ['completed', 'failed', 'cancelled'].includes(
+    const toTerminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(
       payload.status || '',
     );
     if (fromActive && toTerminal) {
@@ -1069,7 +1098,8 @@ export function useWorkbench() {
 
   async function switchPreviewNode(nodeId: string) {
     if (!nodeId || artifactPreview.mode !== 'single') return;
-    await previewArtifact(nodeId);
+    // 弹窗内切换必须写回 artifactPreview（默认只更新侧栏）
+    await previewArtifact(nodeId, { modal: true });
   }
 
   async function openCompareDiff(nodeId: string) {
@@ -1373,8 +1403,10 @@ export function useWorkbench() {
         ? '任务完成'
         : run.status === 'failed'
           ? '任务失败'
-          : '任务已取消';
-    const body = `${run.requirement_name || run.run_id.slice(0, 8)} · ${run.status}`;
+          : isServerInterruptedRun(run)
+            ? '任务中断（可续跑）'
+            : '任务已取消';
+    const body = `${run.requirement_name || run.run_id.slice(0, 8)} · ${statusLabel(run)}`;
     void (async () => {
       const ok = await ensureNotifyPermission();
       if (!ok || typeof Notification === 'undefined') return;
@@ -1404,7 +1436,9 @@ export function useWorkbench() {
       const run = selectedRun.value;
       if (!run || !status) return;
       const fromActive = ['queued', 'running', 'cancelling'].includes(prev || '');
-      const toTerminal = ['completed', 'failed', 'cancelled'].includes(status);
+      const toTerminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(
+        status,
+      );
       if (fromActive && toTerminal) {
         notifyRunTerminal(run);
       }
@@ -1560,6 +1594,8 @@ export function useWorkbench() {
     viewRun,
     startRun,
     statusColor,
+    statusLabel,
+    isServerInterruptedRun,
     systemInfo,
     submitProject,
     submitTask,

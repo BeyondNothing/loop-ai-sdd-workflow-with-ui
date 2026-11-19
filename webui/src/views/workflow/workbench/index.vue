@@ -170,6 +170,8 @@ const {
   toggleCompareRun,
   viewRun,
   statusColor,
+  statusLabel,
+  isServerInterruptedRun,
   systemInfo,
   submitProject,
   submitTask,
@@ -494,8 +496,15 @@ async function onViewRun(runId: string) {
           </Tag>
 
           <div v-if="selectedRun" class="ml-2 flex items-center gap-2 text-xs">
-            <Tag :color="statusColor(selectedRun.status)" class="m-0">
-              {{ selectedRun.status }}
+            <Tag
+              :color="
+                isServerInterruptedRun(selectedRun)
+                  ? 'warning'
+                  : statusColor(selectedRun.status)
+              "
+              class="m-0"
+            >
+              {{ statusLabel(selectedRun) }}
             </Tag>
             <span class="opacity-50">
               节点 {{ completedCount }}/{{ nodeStatuses.length }}
@@ -655,7 +664,7 @@ async function onViewRun(runId: string) {
           <Alert
             v-if="
               selectedRun &&
-              ['failed', 'cancelled'].includes(selectedRun.status) &&
+              ['failed', 'cancelled', 'interrupted'].includes(selectedRun.status) &&
               selectedRun.explain
             "
             class="mb-2 shrink-0"
@@ -665,7 +674,13 @@ async function onViewRun(runId: string) {
             <template #message>
               <div class="flex flex-wrap items-center gap-2">
                 <span>
-                  {{ selectedRun.status === 'failed' ? '执行失败' : '已取消' }}
+                  {{
+                    selectedRun.status === 'failed'
+                      ? '执行失败'
+                      : isServerInterruptedRun(selectedRun)
+                        ? '服务中断（非手动取消，可续跑）'
+                        : '已取消'
+                  }}
                   <template v-if="selectedRun.explain?.stuck_node">
                     · 卡在节点
                     <code>{{ selectedRun.explain.stuck_node }}</code>
@@ -677,7 +692,7 @@ async function onViewRun(runId: string) {
                   type="primary"
                   @click="retrySelectedRun(false)"
                 >
-                  一键重试
+                  {{ isServerInterruptedRun(selectedRun) ? '一键续跑' : '一键重试' }}
                 </Button>
                 <Button size="small" @click="activeTab = 'logs'">看日志</Button>
               </div>
@@ -948,25 +963,40 @@ async function onViewRun(runId: string) {
                       :color="
                         ev.event === 'enter'
                           ? 'blue'
-                          : ev.success === false
-                            ? 'red'
-                            : 'green'
+                          : ev.event === 'resume'
+                            ? 'orange'
+                            : ev.success === false
+                              ? 'red'
+                              : 'green'
                       "
                     >
                       <div class="flex flex-wrap items-baseline gap-2 text-xs">
-                        <span class="font-medium">{{ ev.node_id }}</span>
+                        <span class="font-medium">{{ ev.node_id || '—' }}</span>
                         <Tag
-                          :color="ev.event === 'enter' ? 'processing' : 'default'"
+                          :color="
+                            ev.event === 'enter'
+                              ? 'processing'
+                              : ev.event === 'resume'
+                                ? 'warning'
+                                : 'default'
+                          "
                           class="m-0 cursor-pointer"
                           title="预览产物；若无产物则定位到节点表"
                           @click="
                             async () => {
+                              if (!ev.node_id) return;
                               activeTab = 'pipeline';
                               await openTimelineNode(ev.node_id);
                             }
                           "
                         >
-                          {{ ev.event === 'enter' ? '进入' : '离开' }}
+                          {{
+                            ev.event === 'enter'
+                              ? '进入'
+                              : ev.event === 'resume'
+                                ? '续跑'
+                                : '离开'
+                          }}
                         </Tag>
                         <span
                           v-if="ev.duration_ms != null"
@@ -1257,8 +1287,15 @@ async function onViewRun(runId: string) {
                         </Button>
                       </template>
                       <template v-else-if="column.dataIndex === 'status'">
-                        <Tag :color="statusColor(record.status)" class="m-0">
-                          {{ record.status }}
+                        <Tag
+                          :color="
+                            isServerInterruptedRun(record)
+                              ? 'warning'
+                              : statusColor(record.status)
+                          "
+                          class="m-0"
+                        >
+                          {{ statusLabel(record) }}
                         </Tag>
                       </template>
                       <template v-else-if="column.dataIndex === 'auto'">

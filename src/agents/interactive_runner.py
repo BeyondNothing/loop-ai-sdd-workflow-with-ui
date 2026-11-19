@@ -204,11 +204,12 @@ def _wait_external_interactive(
             )
         if elapsed - last_heartbeat >= 5.0:
             last_heartbeat = elapsed
+            # 不要写 current_node=tool_name（如 oh_my_pi），否则续跑会当成未知节点
             emit_progress(
                 {
                     "phase": "heartbeat",
                     "elapsed_ms": int(elapsed * 1000),
-                    "current_node": tool_name,
+                    "tool": tool_name,
                 }
             )
         time.sleep(_POLL_SECONDS)

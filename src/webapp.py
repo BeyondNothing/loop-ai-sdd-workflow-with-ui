@@ -236,6 +236,8 @@ class WebState:
         self.rule_sets: dict[str, RuleSet] = {}
         self.system_config: dict[str, Any] = {"default_tool": DEFAULT_AI_TOOL}
         self.project_run_locks: dict[str, threading.Lock] = {}
+        # project_id -> 当前持有项目锁的 run_id（强制取消时可跨线程释放）
+        self.project_lock_holders: dict[str, str] = {}
         self.lock = threading.Lock()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -863,6 +865,40 @@ class WebState:
                 lock = threading.Lock()
                 self.project_run_locks[project_id] = lock
             return lock
+
+    def mark_project_lock_holder(self, project_id: str, run_id: str) -> None:
+        with self.lock:
+            self.project_lock_holders[project_id] = run_id
+
+    def clear_project_lock_holder(self, project_id: str, run_id: str | None = None) -> None:
+        with self.lock:
+            holder = self.project_lock_holders.get(project_id)
+            if holder is None:
+                return
+            if run_id is None or holder == run_id:
+                self.project_lock_holders.pop(project_id, None)
+
+    def force_release_project_lock(self, project_id: str, *, run_id: str | None = None) -> bool:
+        """强制释放项目锁（用于「强制取消」后线程仍卡住占锁的情况）。
+
+        threading.Lock 允许其它线程 release；释放后排队的 queued run 才能进入 running。
+        """
+        with self.lock:
+            holder = self.project_lock_holders.get(project_id)
+            if run_id is not None and holder is not None and holder != run_id:
+                return False
+            lock = self.project_run_locks.get(project_id)
+            self.project_lock_holders.pop(project_id, None)
+        if lock is None:
+            return False
+        released = False
+        try:
+            if lock.locked():
+                lock.release()
+                released = True
+        except RuntimeError:
+            released = False
+        return released
 
 
 class WebApp:
@@ -1678,6 +1714,33 @@ class WebApp:
         with self._cancel_lock:
             self._workers.pop(run_id, None)
 
+    def _finalize_terminal(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        reason: str,
+        log_message: str | None = None,
+    ) -> dict[str, Any]:
+        """结束无 worker 的 run：释放项目锁，写入终态（cancelled / interrupted 等）。"""
+        run = self.state.get_run(run_id)
+        # 强制收尸时工作线程可能仍卡在 omp/Warp，必须把项目锁让出来，否则后续全卡 queued
+        if self.state.force_release_project_lock(run.project_id, run_id=run_id):
+            self.state.append_run_log(
+                run_id,
+                "已强制释放项目锁（避免后续运行一直 queued）",
+            )
+        self.state.update_run(
+            run_id,
+            status=status,
+            error=reason,
+            ended_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        self.state.append_run_log(run_id, log_message or reason)
+        self._clear_cancel_event(run_id)
+        self._unregister_worker(run_id)
+        return self._enriched_run_dict(self.state.get_run(run_id))
+
     def _finalize_cancelled(
         self,
         run_id: str,
@@ -1685,18 +1748,33 @@ class WebApp:
         reason: str,
         log_message: str | None = None,
     ) -> dict[str, Any]:
-        self.state.update_run(
+        return self._finalize_terminal(
             run_id,
             status="cancelled",
-            error=reason,
-            ended_at=datetime.now().isoformat(timespec="seconds"),
+            reason=reason,
+            log_message=log_message,
         )
-        self.state.append_run_log(run_id, log_message or reason)
-        self._clear_cancel_event(run_id)
-        return self._enriched_run_dict(self.state.get_run(run_id))
+
+    def _finalize_interrupted(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        log_message: str | None = None,
+    ) -> dict[str, Any]:
+        """服务重启 / worker 丢失：标记中断（非用户取消），可一键续跑。"""
+        return self._finalize_terminal(
+            run_id,
+            status="interrupted",
+            reason=reason,
+            log_message=log_message,
+        )
 
     def _heal_orphaned_runs(self, *, reason: str = "orphaned run") -> int:
-        """把没有存活 worker 的 queued/running/cancelling 收成 cancelled。"""
+        """把没有存活 worker 的 queued/running/cancelling 收成 interrupted（可续跑）。
+
+        不再标成 cancelled，避免「只是服务重启」被理解成用户取消。
+        """
         healed = 0
         for item in self.state.list_runs():
             run_id = str(item.get("run_id") or "")
@@ -1705,14 +1783,17 @@ class WebApp:
                 continue
             if self._worker_alive(run_id):
                 continue
-            self._finalize_cancelled(
+            self._finalize_interrupted(
                 run_id,
                 reason=reason,
-                log_message=f"自动收尸：{reason}（原状态 {status}）",
+                log_message=(
+                    f"运行中断：{reason}（原状态 {status}）。"
+                    "外部 Warp/omp 若仍在跑可忽略；本操作台可点「续跑/重试」从卡点继续。"
+                ),
             )
             healed += 1
         if healed:
-            logger.info("Healed %s orphaned runs (%s)", healed, reason)
+            logger.info("Interrupted %s orphaned runs (%s)", healed, reason)
         return healed
 
     def _acquire_project_lock(
@@ -1728,6 +1809,12 @@ class WebApp:
                 raise RunCancelled("运行已被用户取消（等待项目锁）")
             acquired = project_lock.acquire(timeout=0.5)
             if acquired:
+                # run 在 _run_workflow 里拿得到 project_id；此处用 state 回查
+                try:
+                    project_id = self.state.get_run(run_id).project_id
+                    self.state.mark_project_lock_holder(project_id, run_id)
+                except KeyError:
+                    pass
                 return
             if not warned:
                 self.state.append_run_log(
@@ -1786,6 +1873,41 @@ class WebApp:
 
         return self._enriched_run_dict(self.state.get_run(run_id))
 
+    def _resolve_resume_node(self, source: WorkflowRun, requested: str = "") -> str:
+        """解析可续跑节点；过滤 oh_my_pi 等工具名污染。"""
+        valid = set(NODE_IDS) | {"parallel_plan_and_tests"}
+        requested = (requested or "").strip()
+        if requested in valid:
+            return requested
+
+        result = source.result if isinstance(source.result, dict) else {}
+        candidates = [
+            requested,
+            str(result.get("current_node") or "").strip(),
+            str(source.resume_from_node or "").strip(),
+        ]
+        # 时间线最后一次 enter 的真实节点
+        for ev in reversed(list(result.get("timeline") or [])):
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("event") != "enter":
+                continue
+            nid = str(ev.get("node_id") or "").strip()
+            if nid in valid:
+                candidates.append(nid)
+                break
+        # 已完成节点的下一个
+        done = {str(x) for x in (result.get("completed_nodes") or [])}
+        for node_id in NODE_IDS:
+            if node_id not in done:
+                candidates.append(node_id)
+                break
+
+        for cand in candidates:
+            if cand in valid:
+                return cand
+        return ""
+
     def retry_run(
         self,
         run_id: str,
@@ -1799,8 +1921,8 @@ class WebApp:
         if source.status in {"queued", "running", "cancelling"}:
             raise ValueError("进行中的运行不能重试，请先取消")
         stuck = ""
-        if not fresh and not resume_from_node:
-            stuck = str((source.result or {}).get("current_node") or "").strip()
+        if not fresh:
+            stuck = self._resolve_resume_node(source, resume_from_node)
         payload = {
             "project_id": source.project_id,
             "task_id": source.task_id,
@@ -1813,8 +1935,9 @@ class WebApp:
             "fresh": fresh,
             "headless_all_nodes": source.headless_all_nodes,
             "skip_mcp_setup": source.skip_mcp_setup,
-            "resume_from_node": resume_from_node or stuck,
+            "resume_from_node": stuck if not fresh else "",
             "single_node": single_node,
+            "source_run_id": source.run_id,
         }
         return self.start_run(payload)
 
@@ -1822,6 +1945,10 @@ class WebApp:
     def _normalize_resume_node(node_id: str, *, single_node: bool) -> str:
         node = (node_id or "").strip()
         if not node:
+            return ""
+        valid = set(NODE_IDS) | {"parallel_plan_and_tests"}
+        if node not in valid:
+            # 拒绝工具名等脏数据（如 oh_my_pi）
             return ""
         if single_node:
             return node
@@ -2109,7 +2236,14 @@ class WebApp:
 
             day_key = str(item.get("started_at") or "")[:10] or "unknown"
             bucket = daily.setdefault(
-                day_key, {"total": 0, "completed": 0, "failed": 0, "cancelled": 0}
+                day_key,
+                {
+                    "total": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "interrupted": 0,
+                },
             )
             bucket["total"] += 1
             if status in bucket:
@@ -2121,12 +2255,12 @@ class WebApp:
             duration_ms: float | None = None
             if started is not None and ended is not None and ended >= started:
                 duration_ms = (ended - started) * 1000.0
-                if status in {"completed", "failed", "cancelled"}:
+                if status in {"completed", "failed", "cancelled", "interrupted"}:
                     durations.append(duration_ms)
 
             result = item.get("result") if isinstance(item.get("result"), dict) else {}
             stuck = str((result or {}).get("current_node") or "").strip()
-            if status in {"failed", "cancelled", "cancelling"} and stuck:
+            if status in {"failed", "cancelled", "cancelling", "interrupted"} and stuck:
                 stuck_counter[stuck] = stuck_counter.get(stuck, 0) + 1
 
             sample_runs.append(
@@ -2138,13 +2272,19 @@ class WebApp:
                     "started_at": item.get("started_at"),
                     "ended_at": item.get("ended_at") or "",
                     "duration_ms": round(duration_ms, 1) if duration_ms is not None else None,
-                    "stuck_node": stuck if status in {"failed", "cancelled"} else "",
+                    "stuck_node": stuck
+                    if status in {"failed", "cancelled", "interrupted"}
+                    else "",
                     "tool": item.get("tool"),
                 }
             )
 
         durations_sorted = sorted(durations)
-        failed = status_counts.get("failed", 0) + status_counts.get("cancelled", 0)
+        failed = (
+            status_counts.get("failed", 0)
+            + status_counts.get("cancelled", 0)
+            + status_counts.get("interrupted", 0)
+        )
         terminal = (
             status_counts.get("completed", 0)
             + failed
@@ -2238,7 +2378,7 @@ class WebApp:
                 }
                 if run_status in {"queued", "running", "cancelling"}:
                     buckets["running"].append(item)
-                elif run_status in {"failed", "cancelled"}:
+                elif run_status in {"failed", "cancelled", "interrupted"}:
                     buckets["stuck"].append(item)
                 elif qa_status == "pending":
                     buckets["awaiting"].append(item)
@@ -2255,6 +2395,247 @@ class WebApp:
             "counts": {k: len(v) for k, v in buckets.items()},
         }
 
+    def _docs_rel_for_run(self, run: WorkflowRun) -> str:
+        """推断业务 docs 相对路径（如 docs/test02）。"""
+        docs_rel = str((run.result or {}).get("docs_dir") or "").strip()
+        if docs_rel:
+            return docs_rel
+        if run.requirement_name:
+            from .requirement_dir import make_requirement_slug
+
+            binding = self.state.get_binding(run.project_id)
+            slug = make_requirement_slug(run.requirement_name, name=run.requirement_name)
+            return str(Path(binding.docs_dir or "docs") / slug)
+        return ""
+
+    def _discover_artifacts_from_docs(self, run: WorkflowRun) -> dict[str, Any]:
+        """从磁盘 docs 扫描已有节点产物，供续跑/展示回填（不依赖本 run 的 result）。"""
+        binding = self.state.get_binding(run.project_id)
+        app_root = Path(binding.app_root).expanduser().resolve()
+        docs_rel = self._docs_rel_for_run(run)
+        if not docs_rel:
+            return {"docs_dir": "", "node_outputs": {}, "completed_nodes": []}
+        docs_path = (app_root / docs_rel).resolve()
+        if not docs_path.is_dir():
+            return {"docs_dir": docs_rel, "node_outputs": {}, "completed_nodes": []}
+
+        wf_cfg = load_workflow_config(self._workflow_config_path)
+        outputs: dict[str, str] = {}
+        completed: list[str] = []
+        original = docs_path / "00-requirement.md"
+        if original.is_file():
+            try:
+                outputs["original_requirement"] = str(original.relative_to(app_root))
+            except ValueError:
+                outputs["original_requirement"] = str(original)
+        for node_id in NODE_IDS:
+            node_cfg = wf_cfg.nodes.get(node_id)
+            if node_cfg is None:
+                continue
+            path = docs_path / node_cfg.output_file
+            if not path.is_file():
+                continue
+            try:
+                rel = str(path.relative_to(app_root))
+            except ValueError:
+                rel = str(path)
+            outputs[node_id] = rel
+            completed.append(node_id)
+        return {
+            "docs_dir": docs_rel,
+            "node_outputs": outputs,
+            "completed_nodes": completed,
+        }
+
+    def _synthesize_timeline(
+        self,
+        run: WorkflowRun,
+        *,
+        completed: list[str],
+        outputs: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """无历史 timeline 时，按已完成节点 + 文件 mtime 合成一条可读时间线。"""
+        binding = self.state.get_binding(run.project_id)
+        app_root = Path(binding.app_root).expanduser().resolve()
+        events: list[dict[str, Any]] = []
+        for node_id in NODE_IDS:
+            if node_id not in completed and node_id not in outputs:
+                continue
+            at = run.started_at
+            rel = str(outputs.get(node_id) or "").strip()
+            if rel:
+                path = (app_root / rel).resolve()
+                if path.is_file():
+                    try:
+                        at = datetime.fromtimestamp(path.stat().st_mtime).isoformat(
+                            timespec="seconds"
+                        )
+                    except OSError:
+                        pass
+            events.append(
+                {
+                    "node_id": node_id,
+                    "event": "enter",
+                    "at": at,
+                    "duration_ms": None,
+                    "synthetic": True,
+                }
+            )
+            events.append(
+                {
+                    "node_id": node_id,
+                    "event": "leave",
+                    "at": at,
+                    "duration_ms": None,
+                    "success": True,
+                    "synthetic": True,
+                }
+            )
+        return events
+
+    @staticmethod
+    def _merge_timelines(
+        prior: list[dict[str, Any]],
+        current: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        seen = {
+            (str(e.get("node_id") or ""), str(e.get("event") or ""), str(e.get("at") or ""))
+            for e in current
+            if isinstance(e, dict)
+        }
+        merged: list[dict[str, Any]] = []
+        for item in prior:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                str(item.get("node_id") or ""),
+                str(item.get("event") or ""),
+                str(item.get("at") or ""),
+            )
+            if key in seen:
+                continue
+            merged.append(item)
+        merged.extend([e for e in current if isinstance(e, dict)])
+        return merged[-200:]
+
+    def _lineage_timeline(self, run: WorkflowRun) -> list[dict[str, Any]]:
+        """取同源任务中「最完整」的 timeline（沿 source_run_id 链 + 同任务最长）。"""
+        best: list[dict[str, Any]] = []
+
+        def consider(tl: list[Any]) -> None:
+            nonlocal best
+            cleaned = [dict(e) for e in tl if isinstance(e, dict)]
+            if len(cleaned) > len(best):
+                best = cleaned
+
+        # 沿续跑血缘往上找
+        seen: set[str] = {run.run_id}
+        cursor = str((run.result or {}).get("source_run_id") or "").strip()
+        hops = 0
+        while cursor and cursor not in seen and hops < 8:
+            seen.add(cursor)
+            hops += 1
+            try:
+                source = self.state.get_run(cursor)
+            except KeyError:
+                break
+            consider(list((source.result or {}).get("timeline") or []))
+            cursor = str((source.result or {}).get("source_run_id") or "").strip()
+
+        # 同项目/任务/需求名里取最长（避免选到另一条短续跑）
+        for item in self.state.list_runs():
+            rid = str(item.get("run_id") or "")
+            if not rid or rid in seen:
+                continue
+            if str(item.get("project_id") or "") != run.project_id:
+                continue
+            if run.task_id and str(item.get("task_id") or "") != run.task_id:
+                continue
+            if (
+                run.requirement_name
+                and str(item.get("requirement_name") or "") != run.requirement_name
+            ):
+                continue
+            try:
+                prior = self.state.get_run(rid)
+            except KeyError:
+                continue
+            consider(list((prior.result or {}).get("timeline") or []))
+        return best
+
+    def _seed_run_artifacts_from_docs(
+        self,
+        run: WorkflowRun,
+        *,
+        source: WorkflowRun | None = None,
+        resume_from_node: str = "",
+    ) -> None:
+        """续跑新建 run 时立刻写入已有产物 + 时间线，避免页面空白。"""
+        if run.fresh:
+            return
+        discovered = self._discover_artifacts_from_docs(run)
+        outputs = dict(discovered.get("node_outputs") or {})
+        completed = list(discovered.get("completed_nodes") or [])
+        docs_rel = str(discovered.get("docs_dir") or "")
+        current = ""
+        timeline: list[dict[str, Any]] = []
+        source_run_id = ""
+        if source and isinstance(source.result, dict):
+            source_run_id = source.run_id
+            src_out = source.result.get("node_outputs") or {}
+            if isinstance(src_out, dict):
+                for key, val in src_out.items():
+                    outputs.setdefault(str(key), str(val))
+            for node_id in source.result.get("completed_nodes") or []:
+                nid = str(node_id)
+                if nid and nid not in completed:
+                    completed.append(nid)
+            docs_rel = docs_rel or str(source.result.get("docs_dir") or "")
+            current = str(source.result.get("current_node") or "")
+            timeline = [
+                dict(e)
+                for e in (source.result.get("timeline") or [])
+                if isinstance(e, dict)
+            ]
+
+        # 正在续跑的节点先不当作 completed，避免 UI 误显示已完成
+        resume = (resume_from_node or run.resume_from_node or "").strip()
+        if resume and resume != "parallel_plan_and_tests":
+            completed = [n for n in completed if n != resume]
+        elif resume == "parallel_plan_and_tests":
+            completed = [
+                n for n in completed if n not in {"create_plan", "design_test_cases"}
+            ]
+
+        if not timeline:
+            timeline = self._synthesize_timeline(
+                run, completed=completed, outputs=outputs
+            )
+        if timeline:
+            timeline = list(timeline) + [
+                {
+                    "node_id": resume or current or "",
+                    "event": "resume",
+                    "at": datetime.now().isoformat(timespec="seconds"),
+                    "duration_ms": None,
+                    "note": "续跑接续",
+                }
+            ]
+
+        if not outputs and not docs_rel and not timeline:
+            return
+        self.state.update_run(
+            run.run_id,
+            result={
+                "docs_dir": docs_rel,
+                "node_outputs": outputs,
+                "completed_nodes": completed,
+                "current_node": resume or current,
+                "timeline": timeline[-200:],
+                "source_run_id": source_run_id,
+            },
+        )
+
     def _resolve_artifact_path(self, run: WorkflowRun, node_id: str) -> Path:
         binding = self.state.get_binding(run.project_id)
         app_root = Path(binding.app_root).expanduser().resolve()
@@ -2266,12 +2647,7 @@ class WebApp:
                 return path
 
         # 失败/无 result：按 docs_dir + 节点 output_file 回退
-        docs_rel = str((run.result or {}).get("docs_dir") or "").strip()
-        if not docs_rel and run.requirement_name:
-            from .requirement_dir import make_requirement_slug
-
-            slug = make_requirement_slug(run.requirement_name, name=run.requirement_name)
-            docs_rel = str(Path(binding.docs_dir or "docs") / slug)
+        docs_rel = self._docs_rel_for_run(run)
         if docs_rel:
             wf_cfg = load_workflow_config(self._workflow_config_path)
             node_cfg = wf_cfg.nodes.get(node_id)
@@ -2522,8 +2898,14 @@ class WebApp:
             set_progress_callback(None)
             if lock_held and project_lock is not None:
                 try:
+                    run = self.state.get_run(run_id)
+                    self.state.clear_project_lock_holder(run.project_id, run_id)
+                except KeyError:
+                    pass
+                try:
                     project_lock.release()
                 except RuntimeError:
+                    # 可能已被强制取消提前 release
                     pass
             self._clear_cancel_event(run_id)
             self._unregister_worker(run_id)
@@ -2578,6 +2960,23 @@ class WebApp:
         self.state.create_run(run)
         if task_id:
             self.state.set_task_last_run(project_id, task_id, run.run_id)
+        # 非 fresh：立刻把磁盘已有产物写入 run.result，页面不会闪成空
+        source_run: WorkflowRun | None = None
+        source_id = str(payload.get("source_run_id") or "").strip()
+        if source_id:
+            try:
+                source_run = self.state.get_run(source_id)
+            except KeyError:
+                source_run = None
+        try:
+            self._seed_run_artifacts_from_docs(
+                self.state.get_run(run.run_id),
+                source=source_run,
+                resume_from_node=resume_from,
+            )
+            run = self.state.get_run(run.run_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("seed run artifacts failed for %s", run.run_id)
         self._cancel_event(run.run_id)  # 预创建，便于启动前取消
         worker = threading.Thread(
             target=self._run_workflow,
@@ -2637,16 +3036,58 @@ class WebApp:
             )
         return nodes
 
-    @staticmethod
-    def _enriched_run_dict(run: WorkflowRun) -> dict[str, Any]:
+    def _enriched_run_dict(self, run: WorkflowRun) -> dict[str, Any]:
         payload = run.to_dict()
-        result = run.result or {}
+        result = dict(run.result or {})
         current_node = str(result.get("current_node") or "")
-        completed = list(result.get("completed_nodes") or [])
+        completed = [str(x) for x in (result.get("completed_nodes") or [])]
+        outputs = {
+            str(k): str(v)
+            for k, v in (result.get("node_outputs") or {}).items()
+            if str(v).strip()
+        }
+        # 续跑新建 run 尚无 progress 时，用磁盘 docs 回填，避免产物列表空白
+        if run.requirement_name and (not outputs or not result.get("docs_dir")):
+            try:
+                discovered = self._discover_artifacts_from_docs(run)
+                for key, val in (discovered.get("node_outputs") or {}).items():
+                    outputs.setdefault(str(key), str(val))
+                for node_id in discovered.get("completed_nodes") or []:
+                    nid = str(node_id)
+                    if nid and nid not in completed:
+                        completed.append(nid)
+                if not result.get("docs_dir") and discovered.get("docs_dir"):
+                    result["docs_dir"] = discovered["docs_dir"]
+            except Exception:  # noqa: BLE001
+                pass
+        timeline = [e for e in (result.get("timeline") or []) if isinstance(e, dict)]
+        # 续跑后 timeline 常只有新节点：拼上同源历史；必要时按产物合成
+        if run.resume_from_node or result.get("source_run_id") or run.requirement_name:
+            try:
+                prior_tl = self._lineage_timeline(run)
+                if prior_tl:
+                    cur_enter = {
+                        str(e.get("node_id") or "")
+                        for e in timeline
+                        if e.get("event") == "enter"
+                    }
+                    prior_enter = {
+                        str(e.get("node_id") or "")
+                        for e in prior_tl
+                        if e.get("event") == "enter"
+                    }
+                    if prior_enter - cur_enter:
+                        timeline = self._merge_timelines(prior_tl, timeline)
+                elif not timeline and (completed or outputs):
+                    timeline = self._synthesize_timeline(
+                        run, completed=completed, outputs=outputs
+                    )
+            except Exception:  # noqa: BLE001
+                pass
         payload["current_node"] = current_node
         payload["completed_nodes"] = completed
-        payload["node_outputs"] = result.get("node_outputs") or {}
-        payload["timeline"] = list(result.get("timeline") or [])
+        payload["node_outputs"] = outputs
+        payload["timeline"] = timeline
         payload["last_heartbeat_at"] = str(result.get("last_heartbeat_at") or "")
         try:
             payload["heartbeat_elapsed_ms"] = (
@@ -2657,20 +3098,37 @@ class WebApp:
         except (TypeError, ValueError):
             payload["heartbeat_elapsed_ms"] = None
         logs = list(run.logs or [])
-        terminal = run.status in {"failed", "cancelled", "cancelling"}
+        terminal = run.status in {
+            "failed",
+            "cancelled",
+            "cancelling",
+            "interrupted",
+        }
         permission_hint = WebApp._permission_hint(logs, run.error or "")
         manual_command = WebApp._extract_manual_command(logs)
         log_summary = WebApp._log_summary(logs, run.error or "")
+        valid_nodes = set(NODE_IDS) | {"parallel_plan_and_tests"}
+        stuck_node = ""
+        if terminal:
+            if current_node in valid_nodes:
+                stuck_node = current_node
+            else:
+                # current_node 可能被心跳写成工具名，回退到可续跑节点
+                stuck_node = self._resolve_resume_node(run, "")
         payload["explain"] = {
-            "stuck_node": current_node if terminal else "",
+            "stuck_node": stuck_node,
             "last_logs": logs[-20:],
             "log_summary": log_summary,
-            "can_retry": run.status in {"failed", "cancelled", "completed"},
+            "can_retry": run.status
+            in {"failed", "cancelled", "completed", "interrupted"},
             "error": run.error or "",
             "completed_count": len(completed),
             "permission_hint": permission_hint,
             "manual_command": manual_command,
         }
+        # 展示用 current_node 也清洗，避免顶栏显示 oh_my_pi
+        if current_node and current_node not in valid_nodes:
+            payload["current_node"] = stuck_node or ""
         return payload
 
     @staticmethod
@@ -2839,9 +3297,14 @@ class WebApp:
         result = dict(run.result or {})
         phase = str(patch.get("phase") or "")
         current = str(patch.get("current_node") or "").strip()
+        # 心跳里的 tool 名（oh_my_pi）绝不能覆盖工作流 current_node
+        valid_nodes = set(NODE_IDS) | {"parallel_plan_and_tests"}
         now = datetime.now().isoformat(timespec="seconds")
-        if current:
+        if current and phase != "heartbeat" and current in valid_nodes:
             result["current_node"] = current
+        elif current and phase != "heartbeat" and current not in valid_nodes:
+            # 忽略非法节点名，避免污染续跑
+            current = str(result.get("current_node") or "").strip()
         docs_dir = str(patch.get("docs_dir") or "").strip()
         if docs_dir:
             result["docs_dir"] = docs_dir
@@ -2862,12 +3325,12 @@ class WebApp:
         # 时间线
         timeline = list(result.get("timeline") or [])
         enter_at = dict(result.get("node_enter_at") or {})
-        if phase == "enter" and current:
+        if phase == "enter" and current and current in valid_nodes:
             enter_at[current] = now
             timeline.append(
                 {"node_id": current, "event": "enter", "at": now, "duration_ms": None}
             )
-        elif phase == "leave" and current:
+        elif phase == "leave" and current and current in valid_nodes:
             duration_ms = None
             started = enter_at.get(current)
             if started:
@@ -2893,14 +3356,17 @@ class WebApp:
                     result["heartbeat_elapsed_ms"] = int(patch.get("elapsed_ms"))
                 except (TypeError, ValueError):
                     pass
+            tool = str(patch.get("tool") or "").strip()
+            if tool:
+                result["heartbeat_tool"] = tool
             # 心跳不刷时间线，避免噪音；仅更新字段供 UI 显示「已运行 Xs」
         result["node_enter_at"] = enter_at
         result["timeline"] = timeline[-200:]
 
         self.state.update_run(run_id, result=result)
-        if phase == "enter" and current:
+        if phase == "enter" and current and current in valid_nodes:
             self.state.append_run_log(run_id, f"进入节点: {current}")
-        elif phase == "leave" and current:
+        elif phase == "leave" and current and current in valid_nodes:
             ok = patch.get("success")
             mark = "完成" if ok is not False else "结束(有警告)"
             self.state.append_run_log(run_id, f"节点{mark}: {current}")
@@ -2908,10 +3374,12 @@ class WebApp:
             # 每约 30s 写一行，避免日志爆炸
             elapsed_ms = int(result.get("heartbeat_elapsed_ms") or 0)
             if elapsed_ms > 0 and elapsed_ms // 30_000 != (elapsed_ms - 5000) // 30_000:
-                node_label = current or "current"
+                node_label = str(result.get("current_node") or "current")
+                tool = str(result.get("heartbeat_tool") or patch.get("tool") or "")
+                suffix = f" ({tool})" if tool else ""
                 self.state.append_run_log(
                     run_id,
-                    f"心跳: {node_label} 已运行 {elapsed_ms / 1000:.0f}s",
+                    f"心跳: {node_label}{suffix} 已运行 {elapsed_ms / 1000:.0f}s",
                 )
 
     def _serve_index(self, handler: BaseHTTPRequestHandler) -> None:
