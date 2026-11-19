@@ -122,7 +122,8 @@ REM Windows — 在 ai4se-sdd-loop-workflow 目录
 # 打开 http://127.0.0.1:8787/#/workbench
 ```
 
-完整步骤、开发模式与首次建项目见 **§13**。
+**怎么用操作台（推荐先看）：[WEB_UI.md](./WEB_UI.md)**  
+启动参数、开发模式与权限摘要见 **§13**（补充）。
 
 ---
 
@@ -520,7 +521,10 @@ ai4se-sdd-loop-workflow/            # 本仓库根
 
 ---
 
-## 13. Web 操作台（怎么启动）
+## 13. Web 操作台（启动与补充）
+
+> **日常用法、续跑、导入导出、常见问题：请直接看 [WEB_UI.md](./WEB_UI.md)。**  
+> 本节只保留启动命令、开发模式与 macOS 权限等摘要，便于和 CLI 文档放在一起。
 
 基于 [Vben Admin](https://www.vben.pro)（Vue3 + Ant Design Vue）的可视化工作台：项目/任务、流水线执行、日志与产物、规则目录、运行指标、系统设置。默认免登录。
 
@@ -625,7 +629,9 @@ python serve_ui.py --host 127.0.0.1 --port 8787
 
 ### Warp 权限（macOS）
 
-操作台在 macOS 上跑**交互节点**时，会打开 **Warp** 新窗口执行 `omp` / 其它 CLI（启动脚本在 `~/.ai4se/warp/`，项目目录通过 `omp --cwd <app_root>` 传入）。
+更完整的 Warp 复用窗口说明见 [WEB_UI.md §5](./WEB_UI.md#5-macos--warp-与权限)。
+
+操作台在 macOS 上跑**交互节点**时，经 **Warp** 执行 `omp` / 其它 CLI（启动脚本在 `~/.ai4se/warp/`，项目目录通过 `omp --cwd <app_root>` 传入）。Warp 已在运行时会尽量复用当前窗口；仅在未运行时才新开窗。
 
 若业务项目在 **`~/Downloads`、`~/Desktop`、`~/Documents`** 下，macOS TCC 常会拦截，典型报错：
 
