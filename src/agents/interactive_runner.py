@@ -1,6 +1,7 @@
 """交互式 CLI 公共逻辑 — 轮询产出、自动结束进程组；Web UI 无 TTY 时经 Warp 唤起。
 
-macOS：交互节点默认开 Warp 新窗口执行启动脚本。项目若在 Downloads/Desktop/Documents，
+macOS：交互节点经 Warp 执行启动脚本。已有 Warp 进程时复用当前窗口注入下一节点；
+仅在 Warp 未运行时才 new_window。项目若在 Downloads/Desktop/Documents，
 须给 Warp / omp 开启「文稿和数据」或「完全磁盘访问」，否则 omp --cwd 会 EPERM。
 详见 README「Web 操作台 → Warp 权限（macOS）」。
 """
@@ -215,6 +216,63 @@ def _wait_external_interactive(
         time.sleep(_POLL_SECONDS)
 
 
+def _is_warp_running() -> bool:
+    """Warp 稳定版进程名常为 stable，不能用 name contains "Warp" 判断。"""
+    probes = [
+        # exists process "Warp" 可解析应用名，即使 displayed name 是 stable
+        'tell application "System Events" to exists process "Warp"',
+        'tell application "System Events" to '
+        'exists (first process whose bundle identifier contains "dev.warp")',
+    ]
+    for probe in probes:
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", probe],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        if result.stdout.strip().lower() == "true":
+            return True
+    # 无辅助功能权限时仍可用路径兜底
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "/Applications/Warp.app/"],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _ensure_warp_window(safe_dir: Path) -> bool:
+    """确保有可用 Warp 窗口。返回 True=复用已有，False=新开窗口。"""
+    if _is_warp_running():
+        _emit_run_log("复用已有 Warp 窗口（不再 new_window）")
+        try:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Warp" to activate'],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+        time.sleep(0.4)
+        return True
+
+    launch_uri = f"warp://action/new_window?path={quote(str(safe_dir))}"
+    _emit_run_log(f"Warp 未运行，打开新窗口: {launch_uri}")
+    subprocess.run(["open", launch_uri], check=False)
+    time.sleep(1.0)
+    return False
+
+
 def _run_interactive_via_warp_window(
     *,
     cmd: list[str],
@@ -226,9 +284,7 @@ def _run_interactive_via_warp_window(
     # Warp 窗口开在 ~/.ai4se/warp；业务根靠 omp --cwd（勿把 shell cwd 直接放 Downloads）
     workdir = Path(cwd).expanduser().resolve()
     safe_dir = _warp_launcher_dir()
-    launch_uri = f"warp://action/new_window?path={quote(str(safe_dir))}"
-    subprocess.run(["open", launch_uri], check=False)
-    time.sleep(1.0)
+    reused = _ensure_warp_window(safe_dir)
     launcher = _write_warp_launcher_script(cmd, cwd, env)
     logger.info("Warp 启动脚本已生成: %s", launcher)
     _emit_run_log(f"Warp 启动脚本已生成: {launcher}")
@@ -238,11 +294,13 @@ def _run_interactive_via_warp_window(
             "提示: 项目在 Downloads/Desktop/Documents。"
             "若 omp 报 EPERM，请按 README「Warp 权限（macOS）」给 Warp/omp 开磁盘访问后重试。"
         )
-    print(f"[warp] 新窗口已打开，正在注入启动脚本: {launcher}", flush=True)
+    mode = "复用窗口" if reused else "新窗口"
+    print(f"[warp] {mode}，正在注入启动脚本: {launcher}", flush=True)
     launch_cmd = f"bash {shlex_quote(str(launcher))}"
     _emit_run_log(f"若未自动唤起，可在 Warp 中手动执行: {launch_cmd}")
     try:
-        _send_command_to_frontmost_warp(launch_cmd)
+        # 复用时先 Ctrl+C，避免上一节点 omp 仍占着会话导致命令打进对话里
+        _send_command_to_frontmost_warp(launch_cmd, interrupt_first=reused)
         _emit_run_log(f"已向 Warp 注入启动命令: {launch_cmd}")
     except Exception as exc:  # noqa: BLE001
         _emit_run_log(f"Warp 自动键入失败（请手动执行）: {exc}")
@@ -284,7 +342,8 @@ def _write_warp_launcher_script(
                     lines.append(f"export {key}={shlex_quote(value)}")
 
         lines.append(f"# project app_root: {workdir}")
-        lines.append("exec " + " ".join(shlex_quote(part) for part in cmd))
+        # 不用 exec：omp 退出后留在同一 shell，下一节点可复用本窗注入
+        lines.append(" ".join(shlex_quote(part) for part in cmd))
         os.write(fd, ("\n".join(lines) + "\n").encode("utf-8"))
     finally:
         os.close(fd)
@@ -301,24 +360,43 @@ def _write_warp_launcher_script(
     return launcher
 
 
-def _send_command_to_frontmost_warp(command_line: str) -> None:
+def _send_command_to_frontmost_warp(
+    command_line: str,
+    *,
+    interrupt_first: bool = False,
+) -> None:
     script = [
         'tell application "Warp" to activate',
+        "delay 0.25",
         'tell application "System Events"',
-        f'keystroke "{_escape_applescript_text(command_line)}"',
-        "key code 36",
-        "end tell",
     ]
+    if interrupt_first:
+        # 打断上一节点仍在跑的 omp，回到 shell 再注入
+        script.extend(
+            [
+                'keystroke "c" using control down',
+                "delay 0.35",
+                'keystroke "c" using control down',
+                "delay 0.45",
+            ]
+        )
+    script.extend(
+        [
+            f'keystroke "{_escape_applescript_text(command_line)}"',
+            "key code 36",
+            "end tell",
+        ]
+    )
     try:
         result = subprocess.run(
             ["osascript", *sum([["-e", line] for line in script], [])],
             capture_output=True,
             text=True,
             check=False,
-            timeout=15,
+            timeout=20,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("osascript 向 Warp 注入命令超时（15s）") from exc
+        raise RuntimeError("osascript 向 Warp 注入命令超时（20s）") from exc
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "osascript failed").strip())
 

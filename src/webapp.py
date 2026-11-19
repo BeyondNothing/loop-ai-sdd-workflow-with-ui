@@ -2787,7 +2787,7 @@ class WebApp:
             if not run.headless_all_nodes and sys.platform == "darwin":
                 self.state.append_run_log(
                     run_id,
-                    "交互节点将在 Warp 新窗口启动 omp（需关闭「无界面」；系统需允许 Cursor/Terminal 自动化 Warp）",
+                    "交互节点经 Warp 启动 omp：已有窗口则复用，否则新开（需关闭「无界面」；系统需允许 Cursor/Terminal 自动化 Warp）",
                 )
 
             config_path = self._build_runtime_configs(run, binding)
