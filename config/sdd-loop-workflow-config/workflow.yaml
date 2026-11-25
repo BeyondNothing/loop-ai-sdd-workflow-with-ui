@@ -29,6 +29,14 @@ nodes:
     tool: omp
     model: ""
     recommendation_threshold: 0.8
+  design_tech_solution:
+    tool: omp
+    model: ""
+    recommendation_threshold: 0.8
+  design_tech_solution:
+    tool: omp
+    model: ""
+    recommendation_threshold: 0.8
   implement_code:
     tool: omp
     model: ""

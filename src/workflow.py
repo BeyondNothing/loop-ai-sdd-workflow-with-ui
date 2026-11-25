@@ -130,6 +130,9 @@ class DevWorkflow:
     def split_tasks(self, state: DevWorkflowState) -> DevWorkflowState:
         return self.node_runner.run_node("split_tasks", state)
 
+    def design_tech_solution(self, state: DevWorkflowState) -> DevWorkflowState:
+        return self.node_runner.run_node("design_tech_solution", state)
+
     def implement_code(self, state: DevWorkflowState) -> DevWorkflowState:
         return self.node_runner.run_node("implement_code", state)
 
@@ -166,6 +169,12 @@ class DevWorkflow:
     def _route_after_split_tasks(self, state: DevWorkflowState) -> str:
         docs_dir = self._resolve_docs_path(state)
         if phase_complete(docs_dir, "split_tasks", state):
+            return "design_tech_solution"
+        return END
+
+    def _route_after_tech_design(self, state: DevWorkflowState) -> str:
+        docs_dir = self._resolve_docs_path(state)
+        if phase_complete(docs_dir, "design_tech_solution", state):
             return "implement_code"
         return END
 
@@ -187,6 +196,7 @@ class DevWorkflow:
         workflow.add_node("review_plan", self.review_plan)
         workflow.add_node("create_plan", self.create_plan)
         workflow.add_node("split_tasks", self.split_tasks)
+        workflow.add_node("design_tech_solution", self.design_tech_solution)
         workflow.add_node("implement_code", self.implement_code)
         workflow.add_node("verify_tests", self.verify_tests)
         workflow.add_node("ai_review", self.ai_review)
@@ -202,6 +212,7 @@ class DevWorkflow:
                 "review_plan": "review_plan",
                 "create_plan": "create_plan",
                 "split_tasks": "split_tasks",
+                "design_tech_solution": "design_tech_solution",
                 "implement_code": "implement_code",
                 "verify_tests": "verify_tests",
                 "ai_review": "ai_review",
@@ -235,6 +246,14 @@ class DevWorkflow:
         workflow.add_conditional_edges(
             "split_tasks",
             self._route_after_split_tasks,
+            {
+                "design_tech_solution": "design_tech_solution",
+                END: END,
+            },
+        )
+        workflow.add_conditional_edges(
+            "design_tech_solution",
+            self._route_after_tech_design,
             {
                 "implement_code": "implement_code",
                 END: END,
@@ -344,6 +363,7 @@ class DevWorkflow:
             "test_cases_approved": False,
             "review_plan_approved": False,
             "tasks_approved": False,
+            "tech_design_approved": False,
             "test_passed": False,
             "last_error": None,
         }

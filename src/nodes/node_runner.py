@@ -15,6 +15,7 @@ from ..parsers.approval_parser import (
     parse_requirement_approval,
     parse_review_plan_approval,
     parse_tasks_approval,
+    parse_tech_design_approval,
     parse_test_cases_approval,
 )
 from ..parsers.requirement_parser import (
@@ -375,6 +376,7 @@ class NodeRunner:
                     "design_test_cases": parse_test_cases_approval,
                     "review_plan": parse_review_plan_approval,
                     "split_tasks": parse_tasks_approval,
+                    "design_tech_solution": parse_tech_design_approval,
                 }[node_id]
                 state_key = cfg.approval_state_key if cfg else f"{node_id}_approved"
                 updates.update(approval_parser(final_content).to_state(state_key))
@@ -478,6 +480,7 @@ class NodeRunner:
             "design_test_cases": "test_cases",
             "review_plan": "plan_review",
             "split_tasks": "tasks",
+            "design_tech_solution": "tech_design",
             "implement_code": "implement",
             "verify_tests": "verify",
             "ai_review": "ai_review",

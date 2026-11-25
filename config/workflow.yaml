@@ -90,6 +90,24 @@ nodes:
       - state: change_scope
       - state: affected_modules
 
+  # 技术方案：写代码前先按模板产出（背景/目标/思路/模块流程/DDL/实现思路）
+  design_tech_solution:
+    name: 技术方案设计
+    tool: omp
+    mode: interactive
+    prompt: prompts/03_design_tech_solution.md
+    prompt_auto: prompts/03_design_tech_solution.auto.md
+    output: 03-technical-design.md
+    inputs:
+      - doc: 01-requirements.md
+      - doc: 02-plan.md
+      - doc: 02-plan-review.md
+      - doc: 03-tasks.md
+      - doc: 03-technical-design.md
+      - state: requirement_type
+      - state: affected_modules
+      - state: compatibility_risk
+
   implement_code:
     name: 代码实现
     tool: omp
@@ -102,6 +120,7 @@ nodes:
       - doc: 02-plan.md
       - doc: 02-test-cases.md
       - doc: 03-tasks.md
+      - doc: 03-technical-design.md
       - state: requirement_type
       - state: affected_modules
       - state: compatibility_risk
@@ -116,6 +135,7 @@ nodes:
     inputs:
       - doc: 02-test-cases.md
       - doc: 03-tasks.md
+      - doc: 03-technical-design.md
       - doc: 04-implementation.md
 
   ai_review:

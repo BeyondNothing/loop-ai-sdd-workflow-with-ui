@@ -71,8 +71,16 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         final_file="03-tasks.md",
         approval_block="tasks_approval",
         approval_state_key="tasks_approved",
-        next_node="implement_code",
+        next_node="design_tech_solution",
         min_body_chars=200,
+    ),
+    "design_tech_solution": PhaseConfig(
+        node_id="design_tech_solution",
+        final_file="03-technical-design.md",
+        approval_block="tech_design_approval",
+        approval_state_key="tech_design_approved",
+        next_node="implement_code",
+        min_body_chars=300,
     ),
 }
 
@@ -107,6 +115,14 @@ def _validate_generic_final(content: str, cfg: PhaseConfig) -> bool:
     return "##" in body or len(body.splitlines()) >= 8
 
 
+def _validate_tech_design(content: str, cfg: PhaseConfig) -> bool:
+    """技术方案：先过通用结构检查，再要求模板章节齐全。"""
+    if not _validate_generic_final(content, cfg):
+        return False
+    body = _body_without_status(content)
+    return all(section in body for section in TECH_DESIGN_REQUIRED_SECTIONS)
+
+
 CONTENT_VALIDATORS: dict[str, Callable[[str, PhaseConfig], bool]] = {
     "analyze_requirements": lambda content, cfg: _validate_generic_final(content, cfg)
     and _validate_requirements_final(content),
@@ -114,7 +130,17 @@ CONTENT_VALIDATORS: dict[str, Callable[[str, PhaseConfig], bool]] = {
     "design_test_cases": _validate_generic_final,
     "review_plan": _validate_generic_final,
     "split_tasks": _validate_generic_final,
+    "design_tech_solution": _validate_tech_design,
 }
+
+# 技术方案必备章节（缺任一即视为内容未就绪）：背景目标 + 领域命名 + DDL + 实现方向
+TECH_DESIGN_REQUIRED_SECTIONS = (
+    "背景与目标",
+    "领域模型与术语",
+    "术语清单",
+    "数据结构及说明",
+    "实现方向",
+)
 
 
 def phase_content_ready(docs_dir: Path, node_id: str, state: DevWorkflowState) -> bool:

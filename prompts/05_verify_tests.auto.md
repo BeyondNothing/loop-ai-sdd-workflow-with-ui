@@ -49,6 +49,10 @@
 
 {{doc_03-tasks.md}}
 
+### 技术方案
+
+{{doc_03-technical-design.md}}
+
 ### 实现报告
 
 {{doc_04-implementation.md}}

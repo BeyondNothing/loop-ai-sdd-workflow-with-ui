@@ -11,6 +11,7 @@ from .parsers.approval_parser import (
     parse_requirement_approval,
     parse_review_plan_approval,
     parse_tasks_approval,
+    parse_tech_design_approval,
     parse_test_cases_approval,
 )
 from .parsers.requirement_parser import parse_requirement_metadata
@@ -33,7 +34,8 @@ RESUME_CHECKPOINTS: list[tuple[str, str | None]] = [
     ("06-ai-review.md", "commit_code"),
     ("05-test-report.md", "ai_review"),
     ("04-implementation.md", "verify_tests"),
-    ("03-tasks.md", "implement_code"),
+    ("03-technical-design.md", "implement_code"),
+    ("03-tasks.md", "design_tech_solution"),
     ("02-plan-review.md", "split_tasks"),
     ("02-test-cases.md", "review_plan"),
     ("02-plan.md", "parallel_plan_and_tests"),
@@ -48,6 +50,7 @@ ROUTABLE_NODES = frozenset(
         "design_test_cases",
         "review_plan",
         "split_tasks",
+        "design_tech_solution",
         "implement_code",
         "verify_tests",
         "ai_review",
@@ -179,6 +182,14 @@ def restore_state_from_docs(
             parse_tasks_approval(tasks.read_text(encoding="utf-8")).to_state("tasks_approved")
         )
 
+    tech_design = docs_dir / "03-technical-design.md"
+    if tech_design.exists():
+        restored.update(
+            parse_tech_design_approval(tech_design.read_text(encoding="utf-8")).to_state(
+                "tech_design_approved"
+            )
+        )
+
     report = docs_dir / "05-test-report.md"
     if report.exists():
         report_text = report.read_text(encoding="utf-8")
@@ -224,6 +235,10 @@ def _adjust_fallback(
     if filename == "03-tasks.md":
         if not phase_complete(docs_dir, "split_tasks", state):
             return "split_tasks"
+        return "design_tech_solution"
+    if filename == "03-technical-design.md":
+        if not phase_complete(docs_dir, "design_tech_solution", state):
+            return "design_tech_solution"
     return fallback_node
 
 
@@ -267,9 +282,16 @@ def _resolve_from_status(
         if filename == "02-plan-review.md" and status.next_node == "split_tasks":
             if not review_plan_complete(docs_dir, state):
                 return "review_plan"
-        if filename == "03-tasks.md" and status.next_node == "implement_code":
+        if filename == "03-tasks.md" and status.next_node in (
+            "implement_code",
+            "design_tech_solution",
+        ):
             if not phase_complete(docs_dir, "split_tasks", state):
                 return "split_tasks"
+            # 任务已确认：先补技术方案（旧产出会跳过新节点）
+            if not phase_complete(docs_dir, "design_tech_solution", state):
+                return "design_tech_solution"
+            return "implement_code"
         return status.next_node
 
     if status.status == "completed" and not status.next_node and filename == "07-commit.md":
@@ -322,11 +344,23 @@ def _infer_from_status_fields(
         return "review_plan"
 
     if filename == "03-tasks.md":
-        if phase_complete(docs_dir, "split_tasks", state):
+        return _resolve_after_tasks(docs_dir, state)
+
+    if filename == "03-technical-design.md":
+        if phase_complete(docs_dir, "design_tech_solution", state):
             return "implement_code"
-        return "split_tasks"
+        return "design_tech_solution"
 
     return None
+
+
+def _resolve_after_tasks(docs_dir: Path, state: dict) -> str:
+    """任务拆分已确认后的去向：先补技术方案，方案确认后才进实现。"""
+    if not phase_complete(docs_dir, "split_tasks", state):
+        return "split_tasks"
+    if not phase_complete(docs_dir, "design_tech_solution", state):
+        return "design_tech_solution"
+    return "implement_code"
 
 
 def _infer_without_status(
@@ -356,8 +390,11 @@ def _infer_without_status(
         )
 
     if filename == "03-tasks.md":
-        if phase_complete(path.parent, "split_tasks", state):
+        return _resolve_after_tasks(path.parent, state)
+
+    if filename == "03-technical-design.md":
+        if phase_complete(path.parent, "design_tech_solution", state):
             return "implement_code"
-        return "split_tasks"
+        return "design_tech_solution"
 
     return None

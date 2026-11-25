@@ -226,6 +226,7 @@ flowchart TD
     ROUTE --> P[parallel_plan_and_tests<br/>headless 并行]
     ROUTE --> R[review_plan_and_tests<br/>interactive]
     ROUTE --> T[split_tasks]
+    ROUTE --> TD[design_tech_solution]
     ROUTE --> I[implement_code]
     ROUTE --> V[verify_tests]
 
@@ -238,8 +239,11 @@ flowchart TD
     R -->|review 完成| T
     R -->|未完成| PAUSE
 
-    T -->|tasks approved| I
+    T -->|tasks approved| TD
     T -->|未完成| PAUSE
+
+    TD -->|tech_design approved| I
+    TD -->|未完成| PAUSE
 
     I --> V
     V --> DONE([END<br/>05-test-report.md])
@@ -253,7 +257,8 @@ flowchart TD
 | `parallel_plan_and_tests` | 并行计划与用例 | **headless** | `02-plan.md` + `02-test-cases.md` | 线程池并行跑 `create_plan`、`design_test_cases` |
 | `review_plan_and_tests` | 计划与用例评审 | **interactive** | `02-plan-test-review.md` | 业务视角交叉比对，同步修订 plan/test |
 | `split_tasks` | 任务拆分 | **interactive** | `03-tasks.md` | API 详细设计 + `tasks_approval`；**不注入** `02-test-cases.md` |
-| `implement_code` | 代码实现 | **interactive** | 业务代码 + `04-implementation.md` | **只写生产代码**，不写测试；**不注入** `02-test-cases.md` |
+| `design_tech_solution` | 技术方案设计 | **interactive** | `03-technical-design.md` | 领域命名/术语清单 + 领域模型图 + **完整 DDL** + 实现方向 + `tech_design_approval`（**必须用户确认**）；写代码前必须完成 |
+| `implement_code` | 代码实现 | **interactive** | 业务代码 + `04-implementation.md` | 以技术方案的接口与表结构为准；**只写生产代码**，不写测试；DDL 不执行，写入「人工后续事项」 |
 | `verify_tests` | 测试自验证 | **interactive** | `src/test` 测试代码 + `05-test-report.md` | 严格按用例执行单元/API/E2E |
 
 YAML 中还定义 `create_plan`、`design_test_cases` 两个 headless 子节点配置，由 `parallel_plan_and_tests` 内部调用，不单独出现在图上。
@@ -266,9 +271,10 @@ YAML 中还定义 `create_plan`、`design_test_cases` 两个 headless 子节点�
 
 启动时 `determine_start_node()`（`src/router.py`）扫描 `docs/<name>/`：
 
-1. 无 `03-tasks.md` 时，优先解析 plan/test/review 阶段（有 `02-plan`+`02-test-cases` → `review_plan_and_tests` 等）
-2. 再按 checkpoint 链：`05` → `04` → `03` → `02-plan-test-review` → … → `01` → draft
-3. 各阶段需过 **phase gate**（内容就绪 + 用户 `approved`），否则回到对应 interactive 节点
+1. 无 `03-tasks.md` 时，优先解析 plan/test/review 阶段（有 `02-plan`+`02-test-cases` → `review_plan` 等）
+2. 再按 checkpoint 链：`05` → `04` → `03-technical-design` → `03-tasks` → `02-plan-review` → … → `01` → draft
+3. **任务已确认但缺 `03-technical-design.md` 时，续跑落到 `design_tech_solution`**（旧项目升级后会补出方案，再进实现）
+4. 各阶段需过 **phase gate**（内容就绪 + 用户 `approved`），否则回到对应 interactive 节点
 
 | 选项 | 说明 |
 |------|------|
@@ -373,6 +379,7 @@ nodes:
 │       ├── 02-test-cases.md
 │       ├── 02-plan-test-review.md
 │       ├── 03-tasks.md
+│       ├── 03-technical-design.md
 │       ├── 04-implementation.md
 │       ├── 05-test-report.md
 │       └── e2e-screenshots/
@@ -396,7 +403,25 @@ compatibility_risk: low
 status: pending    # pending | approved — 仅 approved 且内容就绪后进入 parallel_plan_and_tests
 ```
 
-后续阶段类似：`test_cases_approval`、`review_plan_tests_approval`、`tasks_approval` 等。
+后续阶段类似：`test_cases_approval`、`review_plan_approval`、`tasks_approval`、`tech_design_approval` 等。
+
+### 技术方案（03-technical-design.md）
+
+`design_tech_solution` 在任务拆分之后、代码实现之前产出。定位是**给用户做全局把控的短文档**：核心是 DDL 与领域命名，实现只讲方向。正文（不含 DDL）建议 150 行以内。
+
+| 章节 | 内容 |
+|------|------|
+| `## 背景与目标` | 做什么 2-3 句 + 非目标 1-3 条 |
+| `## 领域模型与术语` | **术语清单**（术语 / 英文命名 / 定义 / 与现有概念的关系，≤15 条）+ `classDiagram` 领域模型图及说明 |
+| `## 数据结构及说明` | **完整可执行 DDL** + 字段说明表；不涉及库表写「不涉及」 |
+| `## 实现方向` | 分几步、谁调谁、用什么模型或设计模式（落哪一层）、关键取舍；不写文件清单和方法细节 |
+| `## 关键接口` | 方法 / 路径 / 用途 / 入参 / 出参；无接口写「不涉及」 |
+| `## 兼容性与风险` | 最多 3 条 |
+| `## 人工后续事项` | 需人工执行的 DDL / 配置 / 权限 |
+
+前五节缺任一即门禁不通过。**人工模式下 `tech_design_approval` 必须由你确认后才会变成 `approved`**，未确认不会进入代码实现；`--auto` 模式才自动通过。
+
+DDL 只写进文档，不连库执行；执行动作归「人工后续事项」。规范细则见 `ai-rules/tech-solution.md`（业务侧由 `sdd-loop-workflow-config/ai-rules/tech-solution.md` 覆盖）。
 
 ---
 
