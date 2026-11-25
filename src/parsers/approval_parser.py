@@ -65,6 +65,10 @@ def parse_tech_design_approval(content: str) -> Approval:
     return parse_approval(content, "tech_design_approval")
 
 
+def parse_api_design_approval(content: str) -> Approval:
+    return parse_approval(content, "api_design_approval")
+
+
 def _extract_yaml_block(content: str, block_name: str) -> dict[str, Any] | None:
     pattern = rf"```yaml\s+{re.escape(block_name)}\s*\n(.*?)```"
     match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)

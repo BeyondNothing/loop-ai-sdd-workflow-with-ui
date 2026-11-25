@@ -1,697 +1,542 @@
-# ai4se-sdd-loop-workflow
+# AI4SE SDD Loop Workflow
 
-从**原始需求**到**代码实现**再到**测试自验证**的工程化 Workflow。把本仓库 clone 到**业务项目根目录**即可接入；默认把 `docs/`、`ai-rules/` 写在上一级业务工程里，不写进本仓库。
+把「一句需求」变成「可评审的代码」的工程化流水线。
+
+每个阶段都由 AI Agent 完成，但**阶段之间不共享上下文** —— 只通过 `docs/` 下的 Markdown 传递。这样一来每一步都能停下来人工确认，也能随时从任意节点续跑。
+
+```mermaid
+flowchart LR
+  A["需求<br/>澄清"] --> B["计划<br/>用例"]
+  B --> C["评审"]
+  C --> D["任务<br/>拆分"]
+  D --> E["技术<br/>方案"]
+  E --> F["API<br/>设计"]
+  F --> G["代码<br/>实现"]
+  G --> H["测试<br/>验证"]
+  H --> I["AI<br/>评审"]
+  I --> J["提交"]
+  style E fill:#1a3d2e,stroke:#6f6,color:#fff
+  style F fill:#1a3d2e,stroke:#6f6,color:#fff
+```
+
+深色两格是本项目的核心约束：**没写技术方案和 API 契约，不许开始写代码**。
 
 ---
 
-## 1. 接入与启动
+## 目录
 
-### 1.1 放到业务项目根目录
+| 你想做的事 | 看哪里 |
+|------------|--------|
+| 装上并跑起来 | [§1 快速开始](#1-快速开始) |
+| 日常在浏览器里操作 | [WEB_UI.md](./WEB_UI.md) |
+| 搞清楚流水线每一步干什么 | [§4 流水线](#4-流水线) |
+| 看产出文档长什么样 | [§5 产出文档链](#5-产出文档链) |
+| 改配置 / 加节点 / 加工具 | [§6 配置](#6-配置) · [§7 扩展](#7-扩展) |
+| 跑测试 | [§8 开发与测试](#8-开发与测试) |
+| 卡住了 | [§9 常见问题](#9-常见问题) |
 
-在业务仓库根目录（与 `src/`、`pom.xml` / `package.json` 同级）clone 本仓库，目录名保持 `ai4se-sdd-loop-workflow`。默认 `config/workflow.yaml` 里 `app_root: ..`，即上一级就是业务项目根。
+---
 
-```text
-your-project/                      # 业务项目根 = app_root
-├── src/
-├── pom.xml                        # 或其它工程文件
-├── docs/
-│   └── requirements/              # 需求输入（建议）
-├── ai-rules/                      # 可选，项目规范 markdown
-└── ai4se-sdd-loop-workflow/       # 本仓库（clone 到这里）
-    ├── start.sh
-    ├── start.cmd
-    └── config/
-```
+## 1. 快速开始
 
-macOS / Linux：
+### 1.1 环境要求
 
-```bash
-cd /path/to/your-project
-git clone <本仓库 Git 地址> ai4se-sdd-loop-workflow
-cd ai4se-sdd-loop-workflow
-```
-
-Windows（cmd / PowerShell）：
-
-```bat
-cd \path\to\your-project
-git clone <本仓库 Git 地址> ai4se-sdd-loop-workflow
-cd ai4se-sdd-loop-workflow
-```
-
-不要改目录名，也不要把本仓库 clone 到业务工程外面再改 `app_root`，除非你明确要那样部署。
-
-### 1.2 配置
-
-在 **`ai4se-sdd-loop-workflow/`** 内：
-
-1. 复制扩展规则（此文件按项目改，不提交本仓库）：
-
-```bash
-cp config/ai-rules.example.yaml config/ai-rules.yaml
-```
-
-```bat
-copy config\ai-rules.example.yaml config\ai-rules.yaml
-```
-
-按业务规范改 `config/ai-rules.yaml` 中的文件列表；规则正文放在业务根的 `ai-rules/`（例如 `your-project/ai-rules/ddd-design-standard.md`）。
-
-2. 按环境改 `config/workflow.yaml`（一般只需 E2E）：
-
-```yaml
-workflow:
-  app_root: ..              # 保持 ..，指向业务项目根
-  docs_dir: docs
-  e2e:
-    enabled: true
-    headless: false
-    base_url: http://localhost:8080
-```
-
-3. 把需求文件放到业务根 `docs/requirements/`，例如 `your-project/docs/requirements/my-feature.md`。启动时 `--file` 路径相对本仓库根，因此是 `../docs/requirements/my-feature.md`。
-
-前置：Python 3.10+（Windows 用 `python` 或 `py -3`）、Node 18+（E2E / Playwright MCP；macOS 可用 nvm，Windows 可用 nvm-windows）。交互节点需要本机已登录的 Cursor / Claude / omp CLI。
-
-### 1.3 启动命令
-
-在 **`ai4se-sdd-loop-workflow/`** 目录执行。脚本会创建 `.venv`、安装依赖并调用 `run.py`。
-
-| 系统 | 入口 | 说明 |
+| 依赖 | 版本 | 用途 |
 |------|------|------|
-| macOS / Linux | `./start.sh` | bash |
-| Windows | `.\start.cmd` | **推荐**。UTF-8 + `ExecutionPolicy Bypass` 调用 `start.ps1` |
-| Windows | `.\start.ps1` | 若被策略拦截，改用 `start.cmd` |
+| Python | 3.10+ | 编排引擎 |
+| Node.js | 18+（Web 操作台需 20+） | AI CLI / 前端构建 |
+| AI CLI | 至少一个 | 实际执行节点：`omp` / `cursor` / `claude` / `codex` |
+| pnpm | 可选 | 只在需要构建 Web 操作台时 |
+
+AI CLI 需提前安装并登录。以 omp 为例：
 
 ```bash
-# macOS / Linux — 首次（Cursor，指定需求名）
-./start.sh --name my-feature --file ../docs/requirements/my-feature.md
-
-# 调试编排（不调真实 AI）
-./start.sh --tool echo --skip-clarification --file ../docs/requirements/my-feature.md --name my-feature
-
-# omp
-./start.sh --tool omp --skip-clarification --name my-feature --file ../docs/requirements/my-feature.md
-
-# 续跑（不要加 --fresh）
-./start.sh --skip-clarification --name my-feature
-
-# 已装过依赖
-./start.sh --skip-install --name my-feature
+omp auth-broker login        # 或配置 ANTHROPIC_API_KEY 等 provider 环境变量
 ```
 
-```bat
-REM Windows — 在 ai4se-sdd-loop-workflow 目录
-.\start.cmd --name my-feature --file ..\docs\requirements\my-feature.md
-.\start.cmd --tool echo --skip-clarification --file ..\docs\requirements\my-feature.md --name my-feature
-.\start.cmd --tool omp --skip-clarification --name my-feature --file ..\docs\requirements\my-feature.md
-.\start.cmd --skip-clarification --name my-feature
-.\start.cmd --skip-install --name my-feature
-```
-
-`--tool`：`cursor`（也可看 `workflow.yaml` 默认值）、`claude_code`、`oh_my_pi` / `omp`、`echo`。更多选项：`./start.sh --help` 或 `.\start.cmd --help`。
-
-启动脚本会按需同步 Playwright MCP。`e2e.enabled: false` 时跳过 MCP 同步，E2E 在报告中标 skip。Windows 使用 `scripts/playwright-mcp.cmd`。若浏览器 MCP 未生效，重新跑启动脚本后**重启 IDE / omp 会话**。
-
-### 1.4 Web 操作台（可视化）
-
-不想只跑 CLI 时，用 Web 操作台（项目 / 任务 / 流水线 / 指标）：
-
-```bash
-./start_ui.sh
-# 打开 http://127.0.0.1:8787/#/workbench
-```
-
-**怎么用操作台（推荐先看）：[WEB_UI.md](./WEB_UI.md)**  
-启动参数、开发模式与权限摘要见 **§13**（补充）。
-
----
-
-## 2. 设计目标
-
-| 目标 | 说明 |
-|------|------|
-| **流程标准化** | 将「需求 → 计划/用例 → 评审 → 任务 → 代码 → 测试」固化为可重复 pipeline |
-| **职责分离** | LangGraph 管编排，NodeRunner 管执行，AI 工具管调用 |
-| **节点隔离** | 各节点不共享 AI 会话，仅通过 Markdown 传递上下文 |
-| **最小依赖** | 核心依赖 LangGraph + PyYAML，LLM 能力由外部 CLI 提供 |
-| **可配置** | 工具、prompt、项目规则外置 YAML；图结构在代码中固定 |
-| **可追溯** | 每阶段独立 md + Workflow 状态表，支持续跑与 Code Review |
-
----
-
-## 3. 设计原则
-
-### 3.1 LangGraph 只做编排
-
-- **状态管理** — 在节点间传递 `requirement`、`resume_from_node`、`test_passed` 等
-- **节点调度** — 按固定图执行；阶段门禁（approval / content ready）决定是否进入下一节点
-- **续跑路由** — 启动时读 `docs/` 已有产出，决定 `resume_from_node`（见 §5.3）
-
-节点具体行为（prompt、工具、读写哪些 doc）由 `NodeRunner` + YAML 驱动。
-
-### 3.2 节点即独立 Agent
-
-1. 加载 `prompts/` 模板，注入 `{{ai_rules}}`、doc、state 变量
-2. 调用节点配置的 AI 工具（`cursor` / `claude_code` / `oh_my_pi` / `echo`）
-3. 将产出写入 **应用项目根** `docs/<需求名>/`（非本仓库内）
-
-**不共享 AI 会话**；上游信息仅通过 Markdown 与 state 字段传递。
-
-### 3.3 流程固定，配置分离
-
-| 层级 | 位置 | 内容 |
-|------|------|------|
-| 图编排 | `src/workflow.py` | 节点、边、并行 plan/test、门禁路由 |
-| 节点执行 | `config/workflow.yaml` | tool、mode、prompt、inputs |
-| 扩展规则 | `config/ai-rules.yaml` | 各节点 `extend_rules`（本地，不提交） |
-| 规则内容 | `<app_root>/ai-rules/` | 规则 markdown 文件 |
-| 续跑逻辑 | `src/router.py` | 读 docs 决定启动节点 |
-
-### 3.4 Workflow 级配置
-
-```yaml
-workflow:
-  app_root: ..              # 应用项目根（相对本仓库根）
-  docs_dir: docs            # 产出: <app_root>/docs/<需求名>/
-  e2e:
-    enabled: true          # false 时跳过浏览器 E2E
-    base_url: http://localhost:8080
-```
-
-| 配置项 | 说明 | 默认 |
-|--------|------|------|
-| `app_root` | 应用项目根（业务代码 + docs 产出） | `..` |
-| `docs_dir` | 产出相对 app_root 的子目录 | `docs` |
-| `e2e.enabled` | 是否执行浏览器 E2E（Playwright MCP） | `true` |
-| `e2e.headless` | E2E 是否无界面运行（`false`=弹出 Chrome） | `false` |
-| `e2e.base_url` | E2E 服务基址（host/端口） | `http://localhost:8080` |
-
-扩展规则（各项目不同）见 `config/ai-rules.yaml`（从 `ai-rules.example.yaml` 复制，**不提交仓库**）。
-
-`e2e.enabled: false` 时：`verify_tests` 仍执行单元/API 测试；`TC-E2E-*` 在报告中标 **skip**（不算失败）；启动时跳过 Playwright MCP 同步。
-
----
-
-## 4. 整体架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  LangGraph（workflow.py + router.py）                    │
-│  route_next → 各阶段节点 → 门禁边 → END                  │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────┐
-│  NodeRunner（node_runner.py）                            │
-│  渲染 prompt → 调用 AITool → 写 docs / 补 Workflow 状态   │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────┐
-│  AITool：cursor │ claude_code │ oh_my_pi (omp) │ echo       │
-└─────────────────────────────────────────────────────────┘
-```
-
-业务代码、docs 产出与 **ai-rules** 均在 **应用项目根**（`workflow.app_root`）。本仓库仅保留编排配置与 prompts。
-
----
-
-## 5. Workflow 流程
-
-### 5.1 流程图
+### 1.2 两种用法
 
 ```mermaid
 flowchart TD
-    START([start.sh / start.cmd]) --> ROUTE[route_next<br/>读 docs 定 resume_from_node]
-    ROUTE --> A[analyze_requirements<br/>interactive]
-    ROUTE --> P[parallel_plan_and_tests<br/>headless 并行]
-    ROUTE --> R[review_plan_and_tests<br/>interactive]
-    ROUTE --> T[split_tasks]
-    ROUTE --> TD[design_tech_solution]
-    ROUTE --> I[implement_code]
-    ROUTE --> V[verify_tests]
-
-    A -->|requirements_complete| P
-    A -->|未完成| PAUSE([END 待续跑])
-
-    P -->|plan + test-cases 就绪| R
-    P -->|失败/未完成| PAUSE
-
-    R -->|review 完成| T
-    R -->|未完成| PAUSE
-
-    T -->|tasks approved| TD
-    T -->|未完成| PAUSE
-
-    TD -->|tech_design approved| I
-    TD -->|未完成| PAUSE
-
-    I --> V
-    V --> DONE([END<br/>05-test-report.md])
+  A["选定业务工程根 app_root"] --> B{"喜欢哪种？"}
+  B -->|"浏览器"| C["./start_ui.sh<br/>打开 8787"]
+  B -->|"命令行"| D["python -m src.cli init<br/>./start.sh"]
+  C --> E["同一个引擎<br/>同一套 docs"]
+  D --> E
+  style C fill:#1a3d2e,stroke:#6f6,color:#fff
+  style D fill:#1a3d2e,stroke:#6f6,color:#fff
 ```
 
-### 5.2 节点一览
+两条路产出完全一样，都在 `<app_root>/docs/<需求名>/`。可以混用。
 
-| 节点 ID | 名称 | 模式 | 产出 | 说明 |
-|---------|------|------|------|------|
-| `analyze_requirements` | 需求分析与澄清 | **interactive** | `draft/01-requirements.draft.md` → `01-requirements.md` | 澄清清单 + 定稿 + `requirement_approval` |
-| `parallel_plan_and_tests` | 并行计划与用例 | **headless** | `02-plan.md` + `02-test-cases.md` | 线程池并行跑 `create_plan`、`design_test_cases` |
-| `review_plan_and_tests` | 计划与用例评审 | **interactive** | `02-plan-test-review.md` | 业务视角交叉比对，同步修订 plan/test |
-| `split_tasks` | 任务拆分 | **interactive** | `03-tasks.md` | API 详细设计 + `tasks_approval`；**不注入** `02-test-cases.md` |
-| `design_tech_solution` | 技术方案设计 | **interactive** | `03-technical-design.md` | 领域命名/术语清单 + 领域模型图 + **完整 DDL** + 实现方向 + `tech_design_approval`（**必须用户确认**）；写代码前必须完成 |
-| `implement_code` | 代码实现 | **interactive** | 业务代码 + `04-implementation.md` | 以技术方案的接口与表结构为准；**只写生产代码**，不写测试；DDL 不执行，写入「人工后续事项」 |
-| `verify_tests` | 测试自验证 | **interactive** | `src/test` 测试代码 + `05-test-report.md` | 严格按用例执行单元/API/E2E |
-
-YAML 中还定义 `create_plan`、`design_test_cases` 两个 headless 子节点配置，由 `parallel_plan_and_tests` 内部调用，不单独出现在图上。
-
-**interactive**：继承终端，用户与 Agent 对话；产出写入后 workflow 结束当前 CLI 会话，需再次启动脚本续跑下一阶段（或由单次 run 连续跑完所有已就绪门禁的节点——实际以 LangGraph 一次 invoke 为准，交互节点会在未过门禁时 END）。
-
-**headless**：`agent -p` 非交互执行，写完整 md 到磁盘。
-
-### 5.3 续跑与 CLI 选项
-
-启动时 `determine_start_node()`（`src/router.py`）扫描 `docs/<name>/`：
-
-1. 无 `03-tasks.md` 时，优先解析 plan/test/review 阶段（有 `02-plan`+`02-test-cases` → `review_plan` 等）
-2. 再按 checkpoint 链：`05` → `04` → `03-technical-design` → `03-tasks` → `02-plan-review` → … → `01` → draft
-3. **任务已确认但缺 `03-technical-design.md` 时，续跑落到 `design_tech_solution`**（旧项目升级后会补出方案，再进实现）
-4. 各阶段需过 **phase gate**（内容就绪 + 用户 `approved`），否则回到对应 interactive 节点
-
-| 选项 | 说明 |
-|------|------|
-| `--name`, `-n` | 需求目录名，产出在 `<app_root>/docs/<name>/` |
-| `--file`, `-f` | 从文件读需求（推荐） |
-| `--skip-clarification` | 跳过需求/任务澄清 loop |
-| `--fresh` | **清除**该目录下 md（保留 `00-requirement.md`）后重来；**与续跑互斥** |
-| `--tool echo` | 调试编排，不调真实 AI |
-| `--skip-mcp-setup` | 跳过 Playwright MCP 配置 |
-
-平台入口、配置与启动示例见 **§1**。续跑常用：
-
-```bash
-# macOS / Linux
-./start.sh --name product-list-toc --file ../docs/requirements/product-list-toc-requirement.md
-./start.sh --skip-clarification --name product-list-toc   # 续跑，不要加 --fresh
-```
-
-```bat
-REM Windows（在本仓库根目录；推荐 start.cmd）
-.\start.cmd --name product-list-toc --file ..\docs\requirements\product-list-toc-requirement.md
-.\start.cmd --skip-clarification --name product-list-toc
-```
-
-每个产出 md 末尾由程序写入 **Workflow 状态** 表（`node`、`status`、`next_node`、`pending_count` 等），供人工查看；续跑以 **文件是否存在 + approval 块 + router 规则** 为准，不仅看 `next_node`。
-
----
-
-## 6. 测试设计
-
-### 6.1 分工
-
-| 阶段 | 单元 `TC-UNIT-*` | API `TC-API-*` | E2E `TC-E2E-*` |
-|------|------------------|----------------|----------------|
-| `design_test_cases` | 写入 `02-test-cases.md` | 写入 `02-test-cases.md` | 不在此阶段设计 |
-| `review_plan_and_tests` | 交叉核对并同步修订 | 交叉核对并同步修订 | 不在此阶段设计 |
-| `split_tasks` | 不注入、不拆测试任务 | 不注入、不拆测试任务 | 不涉及 |
-| `implement_code` | 不写、不注入用例全文 | 不写、不注入用例全文 | 不涉及 |
-| `verify_tests` | 编写 + 运行 | 编写 + 运行 | 补充用例 + 执行（受 `e2e.enabled` 控制） |
-
-- **用例注入**：`02-test-cases.md` 只进入 `review_plan_and_tests`、`verify_tests` 的 prompt（`workflow.yaml` `inputs`）；`split_tasks` / `implement_code` 不读该文件
-- **唯一依据**：`verify_tests` 严格按 `02-test-cases.md`（及本节点补充的 E2E 用例）执行
-- **框架**：必须使用业务工程已有测试栈（JUnit、MockMvc、`src/test`、Maven/Gradle），禁止自建独立测试工程
-- **E2E**：仅 `verify_tests` prompt 描述；**必须**使用 Playwright MCP（`config/mcp/servers.json`）；截图**只**写入 `docs/<req>/e2e-screenshots/`（独立目录，禁止与 `05-test-report.md` 同级）。**禁止** agent 在 MCP 失败时改用 Playwright CLI / 自建脚本；须告知用户 MCP 不可用并等待用户决策
-
-### 6.2 开发阶段不涉及 E2E
-
-计划、任务、实现、review 等 prompt **不描述** E2E 执行细节；E2E 配置与 MCP 说明仅在 `prompts/05_verify_tests.md`。
-
----
-
-## 7. 扩展规则（ai-rules）
-
-### 7.1 配置（本地，不提交）
-
-与 `workflow.yaml` 同级，复制示例后按项目修改：
-
-```bash
-cp config/ai-rules.example.yaml config/ai-rules.yaml
-```
-
-```yaml
-# config/ai-rules.yaml
-ai_rules_dir: ai-rules   # 相对 app_root
-
-nodes:
-  analyze_requirements:
-    - ddd-design-standard.md
-  implement_code:
-    - ddd-design-standard.md
-  # ... 其他节点 node_id 与 workflow.yaml 一致
-```
-
-| 字段 | 说明 |
-|------|------|
-| `ai_rules_dir` | 规则 markdown 目录（相对 `app_root`） |
-| `nodes.<node_id>` | 该节点注入的规则文件名列表 |
-
-未配置 `ai-rules.yaml` 时，各节点 `{{ai_rules}}` 为空提示，workflow 仍可运行。
-
-### 7.2 规则文件
-
-`NodeRunner` 从 `<app_root>/<ai_rules_dir>/` 读取上述文件，拼入 prompt 的 `{{ai_rules}}`。规则内容归属应用项目，不放在本仓库内。
-
----
-
-## 8. 产出文档链
-
-```text
-<app_root>/                          # 应用项目（默认 = 本仓库的上级目录）
-├── src/main/ ...                    # 业务代码
-├── pom.xml
-├── docs/
-│   ├── requirements/                # 原始需求输入（示例与自定义）
-│   │   ├── jwt-login-requirement.md
-│   │   └── product-list-toc-requirement.md
-│   └── <requirement-slug>/          # workflow 运行时产出
-│       ├── 00-requirement.md
-│       ├── draft/
-│       ├── 01-requirements.md
-│       ├── 02-plan.md
-│       ├── 02-test-cases.md
-│       ├── 02-plan-test-review.md
-│       ├── 03-tasks.md
-│       ├── 03-technical-design.md
-│       ├── 04-implementation.md
-│       ├── 05-test-report.md
-│       └── e2e-screenshots/
-```
-
-需求 slug：默认从 `--file` 文件名或 `--name` 推导（如 `docs/requirements/jwt-login-requirement.md` → `jwt-login`）。
-
-### 需求定稿结构化块
-
-`01-requirements.md` 头部需含：
-
-```yaml requirement_metadata
-requirement_type: new              # new | existing_change
-requirement_summary: "..."
-change_scope: "..."
-affected_modules: [...]
-compatibility_risk: low
-```
-
-```yaml requirement_approval
-status: pending    # pending | approved — 仅 approved 且内容就绪后进入 parallel_plan_and_tests
-```
-
-后续阶段类似：`test_cases_approval`、`review_plan_approval`、`tasks_approval`、`tech_design_approval` 等。
-
-### 技术方案（03-technical-design.md）
-
-`design_tech_solution` 在任务拆分之后、代码实现之前产出。定位是**给用户做全局把控的短文档**：核心是 DDL 与领域命名，实现只讲方向。正文（不含 DDL）建议 150 行以内。
-
-| 章节 | 内容 |
-|------|------|
-| `## 背景与目标` | 做什么 2-3 句 + 非目标 1-3 条 |
-| `## 领域模型与术语` | **术语清单**（术语 / 英文命名 / 定义 / 与现有概念的关系，≤15 条）+ `classDiagram` 领域模型图及说明 |
-| `## 数据结构及说明` | **完整可执行 DDL** + 字段说明表；不涉及库表写「不涉及」 |
-| `## 实现方向` | 分几步、谁调谁、用什么模型或设计模式（落哪一层）、关键取舍；不写文件清单和方法细节 |
-| `## 关键接口` | 方法 / 路径 / 用途 / 入参 / 出参；无接口写「不涉及」 |
-| `## 兼容性与风险` | 最多 3 条 |
-| `## 人工后续事项` | 需人工执行的 DDL / 配置 / 权限 |
-
-前五节缺任一即门禁不通过。**人工模式下 `tech_design_approval` 必须由你确认后才会变成 `approved`**，未确认不会进入代码实现；`--auto` 模式才自动通过。
-
-DDL 只写进文档，不连库执行；执行动作归「人工后续事项」。规范细则见 `ai-rules/tech-solution.md`（业务侧由 `sdd-loop-workflow-config/ai-rules/tech-solution.md` 覆盖）。
-
----
-
-## 9. 节点配置三要素
-
-```yaml
-analyze_requirements:
-  name: 需求分析与澄清
-  tool: cursor
-  mode: interactive          # interactive | headless
-  prompt: prompts/01_requirements.md
-  output: 01-requirements.md
-  inputs:
-    - state: requirement
-    - doc: 01-requirements.draft.md
-    - doc: 01-requirements.md
-```
-
-节点 `extend_rules` 在 `config/ai-rules.yaml` 中配置，不在 `workflow.yaml`。
-
-### 9.1 AI 工具
-
-| 工具 | headless | interactive |
-|------|----------|-------------|
-| `cursor` | `agent -p --force --trust` + 短指令（先 read prompt 文件） | `agent --trust --force` + 短指令 |
-| `claude_code` | `claude --print --permission-mode bypassPermissions --dangerously-skip-permissions` + 短指令 | 同上（无 `--print`） |
-| `oh_my_pi` / `omp` | `omp -p --auto-approve --no-session` + 短指令 | `omp --auto-approve` + 短指令 |
-| `echo` | 回显 prompt（调试） | 跳过 |
-
-`cursor` / `claude_code` / `omp` 都先把渲染后的全文写入 `docs/<需求名>/temp-prompts/<node_id>.prompt.md`，argv 里只放「read 该文件」的短指令，避免 Windows 命令行约 32KB 上限把评审等大 prompt 截断。禁止用 `@` 内联该文件。
-
-`oh_my_pi` 即 [Oh My Pi](https://omp.sh/) 终端 Agent，CLI 命令为 `omp`。使用前需安装并登录（如 `omp auth-broker login` 或配置 `ANTHROPIC_API_KEY` 等 provider 环境变量）。
-
-**Playwright MCP 与 omp 内置 browser 冲突**：omp 默认 `browser.enabled=true` 时会启用内置 Puppeteer browser，并**自动过滤** `.omp/mcp.json` 中的 `playwright` MCP（Cursor 无此行为）。`start.sh` 同步时会写入 **`.omp/config.yml`**（`browser.enabled: false`），omp 从项目根启动时会自动加载；workflow 启动 omp 时另注入 `config/omp-workflow.yaml` 作为双保险。若 `/mcp list` 只有 `pi-agent/browser` 而无 playwright，请重新 `./start.sh` 同步后**新开 omp 会话**（旧会话不会热加载配置）。omp 里 Playwright 工具名是 `mcp__playwright_browser_*`（如 `mcp__playwright_browser_navigate`），不是 Cursor 的裸名 `browser_*`；`/mcp list` 已 ready 时不要把 `browser_navigate` Unknown tool 当成 MCP 故障。
-
-注册：`src/agents/registry.py`。
-
-### 9.2 Prompt 变量
-
-- **state**：`{{requirement}}`、`{{project_root}}`、`{{requirement_type}}` …
-- **doc**：`{{doc_01-requirements.md}}` — 读取当前需求目录下对应文件（仅该节点 `inputs` 里列出的 doc 会注入）
-- **ai_rules**：`{{ai_rules}}` — 来自 `config/ai-rules.yaml` + `<app_root>/ai-rules/`
-- **verify 专用**：`{{e2e_enabled}}`、`{{e2e_headless}}`、`{{e2e_base_url}}`；`{{doc_02-test-cases.md}}` 仅在评审与 verify 节点注入
-
----
-
-## 10. 状态管理
-
-`src/state.py` 中 `DevWorkflowState` 主要字段：
-
-| 字段 | 说明 |
-|------|------|
-| `requirement` / `docs_dir` / `requirement_slug` | 输入与产出路径 |
-| `resume_from_node` | 启动时由 router 设置，只用于 `route_next` |
-| `requirement_type` … `requirement_metadata` | 需求分析结构化结果 |
-| `requirement_approved` … `tasks_approved` | 各阶段用户确认 |
-| `clarification_*` | 澄清清单状态 |
-| `skip_clarification` | CLI `--skip-clarification` |
-| `node_outputs` / `completed_nodes` | 累积型 reducer |
-| `test_passed` | 读 `05-test-report.md` 文末 Workflow 状态表的 `test_passed` 字段 |
-
----
-
-## 11. 目录结构
-
-```text
-ai4se-sdd-loop-workflow/            # 本仓库根
-├── README.md
-├── start.sh                    # macOS / Linux 入口（venv + run.py）
-├── start.ps1 / start.cmd       # Windows 入口（cmd 包装 PowerShell）
-├── run.py
-├── pyproject.toml
-├── langgraph.json
-│
-├── config/
-│   ├── workflow.yaml
-│   ├── ai-rules.example.yaml   # 扩展规则示例（复制为 ai-rules.yaml）
-│   └── mcp/
-│       └── servers.json        # Playwright MCP（E2E）
-│
-├── prompts/
-│   └── ...
-│
-└── src/
-```
-
-应用项目根（默认本仓库的上级目录）：
-
-```text
-<app_root>/
-├── ai-rules/                   # 扩展规则（如 ddd-design-standard.md）
-├── docs/
-│   ├── requirements/           # 原始需求输入
-│   └── <requirement-slug>/     # workflow 运行时产出
-└── src/main/ ...
-```
-
-本仓库内**不再**包含业务 `docs/` 或 `ai-rules/`（均在应用项目根）。目录关系与 clone 方式见 **§1**。
-
----
-
-## 12. 扩展指南
-
-### 新增节点
-
-1. `src/workflow.py` — 节点函数、`add_node`、条件边
-2. `src/router.py` — `ROUTABLE_NODES`、checkpoint、gate（若需续跑）
-3. `src/phase_gate.py` — `PHASE_CONFIGS`（若有 approval）
-4. `config/workflow.yaml` + `prompts/` 新模板
-
-### 新增 AI 工具
-
-实现 `AITool` → 注册 `src/agents/registry.py` → yaml 中 `tool:` 引用。
-
-### 新增项目规则
-
-在 `<app_root>/ai-rules/` 添加 md，在 `config/ai-rules.yaml` 对应节点的列表中引用。
-
-### 调整流程
-
-修改 `src/workflow.py` 中的边与门禁函数；YAML  alone 无法改拓扑。
-
----
-
-## 13. Web 操作台（启动与补充）
-
-> **日常用法、续跑、导入导出、常见问题：请直接看 [WEB_UI.md](./WEB_UI.md)。**  
-> 本节只保留启动命令、开发模式与 macOS 权限等摘要，便于和 CLI 文档放在一起。
-
-基于 [Vben Admin](https://www.vben.pro)（Vue3 + Ant Design Vue）的可视化工作台：项目/任务、流水线执行、日志与产物、规则目录、运行指标、系统设置。默认免登录。
-
-### 13.1 前置依赖
-
-| 依赖 | 要求 |
-|------|------|
-| Python | 3.10+（`python3`） |
-| Node.js | 20+ |
-| pnpm | [`corepack enable`](https://pnpm.io) 或安装到 `PATH`（脚本也会找 `~/.local/bin`） |
-| 可选 CLI | 真实跑节点需要本机已登录的 `omp` / Cursor / Claude 等 |
-
-仓库可单独 clone 使用（不必嵌在业务工程里）；在操作台「新建项目」里绑定业务工程的 `app_root` 即可。
-
-### 13.2 一键启动（推荐 · 生产模式）
-
-在**本仓库根目录**执行：
+### 1.3 方式一：Web 操作台（推荐日常使用）
 
 ```bash
 git clone https://github.com/BeyondNothing/loop-ai-sdd-workflow-with-ui.git
 cd loop-ai-sdd-workflow-with-ui
-
-# 首次：创建 .venv、安装 Python 包；若无 webui/dist 会自动 pnpm install + build
 ./start_ui.sh
 ```
 
-浏览器打开：
+打开 <http://127.0.0.1:8787/#/workbench>，在界面里新建项目并绑定业务工程根目录即可。
 
-```text
-http://127.0.0.1:8787/#/workbench
+完整操作说明见 **[WEB_UI.md](./WEB_UI.md)**。
+
+常用变体：
+
+```bash
+SKIP_INSTALL=1 ./start_ui.sh              # 已装过依赖，快速再起
+UI_HOST=0.0.0.0 UI_PORT=8787 ./start_ui.sh  # 改监听地址
+./start_ui_dev.sh                          # 改前端时用（Vite 5666 + API 8787）
+lsof -i :8787 -t | xargs kill              # 端口被占用
 ```
 
-常用页面：
+### 1.4 方式二：命令行
 
-| 路径 | 说明 |
+先在业务工程根初始化一次（生成 `sdd-loop-workflow-config/` 与 skill）：
+
+```bash
+cd <你的业务工程根>
+python -m src.cli init --workflow-root /path/to/loop-ai-sdd-workflow-with-ui
+```
+
+然后在仓库根跑流水线：
+
+```bash
+cd /path/to/loop-ai-sdd-workflow-with-ui
+./start.sh --name my-feature --file ../docs/requirements/my-feature.md
+```
+
+续跑同一条需求（**不要**加 `--fresh`）：
+
+```bash
+./start.sh --name my-feature
+```
+
+不调 AI，只验证编排是否跑通：
+
+```bash
+./start.sh --tool echo --skip-clarification --name smoke
+```
+
+| 平台 | 入口 |
 |------|------|
-| `#/workbench` | SDD 操作台（项目 / 任务 / 执行） |
-| `#/rule-dirs` | 规则目录（RuleSet） |
-| `#/metrics` | 运行指标（近 N 日耗时 / 失败率 / 卡点） |
-| `#/settings` | 系统设置（工具 / 置信度 / MCP · Skill 连通探测） |
+| macOS / Linux | `./start.sh` |
+| Windows | `.\start.cmd`（内部调 `start.ps1`） |
 
-已装过依赖、只想快速拉起：
+`--tool` 可选：`omp`（默认）、`cursor`、`claude_code`、`codex`、`echo`（调试用，不调 AI）。
 
-```bash
-SKIP_INSTALL=1 ./start_ui.sh
-```
-
-改监听地址 / 端口：
-
-```bash
-UI_HOST=0.0.0.0 UI_PORT=8787 ./start_ui.sh
-```
-
-停止：在运行该脚本的终端按 `Ctrl+C`。端口占用时可：
-
-```bash
-lsof -i :8787 -t | xargs kill
-```
-
-### 13.3 首次使用（操作台内）
-
-1. 打开 **SDD 操作台** → 左上角 **+** 新建项目  
-2. 填写名称、业务工程 **根目录 `app_root`**（建议绝对路径；可勾选「目录不存在时创建」「创建后自动初始化」）  
-3. 可选绑定 RuleSet；保存后会同步 `sdd-loop-workflow-config` / Skill / MCP  
-4. 新建任务 → 填需求或选 PRD → 点运行  
-5. 交互节点默认走 **Warp**（macOS）；权限问题见下方「Warp 权限」
-
-### 13.4 开发模式（改前端时）
-
-前后端同时起：API 在 `8787`，Vite 在 `5666` 并代理 `/api`。
-
-```bash
-./start_ui_dev.sh
-# 前端 http://127.0.0.1:5666
-# 后端 http://127.0.0.1:8787
-```
-
-### 13.5 手动构建 / 仅起后端
-
-```bash
-# 虚拟环境 + 可编辑安装（与 start_ui.sh 相同）
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e .
-
-cd webui && pnpm install && pnpm build && cd ..
-python serve_ui.py --host 127.0.0.1 --port 8787
-```
-
-前端有改动后需重新 `pnpm build`（或用 `start_ui_dev.sh` 热更新）。
-
-### 13.6 状态持久化
-
-操作台数据保存在 `.dev-workflow/web-ui/`（已 gitignore）：
-
-| 路径 | 内容 |
-|------|------|
-| `bindings.json` | 项目绑定 |
-| `tasks.json` | 任务列表（含 `last_run_id`） |
-| `runs.json` | 运行记录（重启可恢复） |
-| `runtime/<project_id>/` | 单次 run 的运行时配置副本 |
-
-### Warp 权限（macOS）
-
-更完整的 Warp 复用窗口说明见 [WEB_UI.md §5](./WEB_UI.md#5-macos--warp-与权限)。
-
-操作台在 macOS 上跑**交互节点**时，经 **Warp** 执行 `omp` / 其它 CLI（启动脚本在 `~/.ai4se/warp/`，项目目录通过 `omp --cwd <app_root>` 传入）。Warp 已在运行时会尽量复用当前窗口；仅在未运行时才新开窗。
-
-若业务项目在 **`~/Downloads`、`~/Desktop`、`~/Documents`** 下，macOS TCC 常会拦截，典型报错：
-
-```text
-EPERM: operation not permitted
-Cannot change working directory to .../Downloads/...
-grant omp Files & Folders or Full Disk Access
-```
-
-**推荐配置（继续用 Warp，不要改用 Terminal）：**
-
-1. 打开 **系统设置 → 隐私与安全性**
-2. **完全磁盘访问权限（Full Disk Access）** 中添加并开启：
-   - **Warp**（`/Applications/Warp.app`）
-   - **omp**（一般为 `~/.local/bin/omp`；若列表只能选 App，可用「+」选该可执行文件，或给其父级终端环境授权后再试）
-3. 可选：同一页的 **文件和文件夹（Files and Folders）** 里，确认 Warp 对「下载文件夹」等已允许
-4. **完全退出并重启 Warp**（⌘Q 后再开），再在操作台重新执行任务
-5. 若仍失败：把项目移到非受限目录（如 `~/IdeaProjects/your-app`），在操作台更新项目的 `app_root` 绑定
-
-**辅助权限（自动注入命令）：**
-
-- **系统设置 → 隐私与安全性 → 自动化**：允许运行操作台的进程（如 Terminal / Cursor）控制 **Warp**、**System Events**
-- 日志里会出现 `bash ~/.ai4se/warp/ai4se_warp_*.sh`；未自动键入时可在 Warp 中手动粘贴执行
-
-关闭 Warp 桥接（仅调试）：环境变量 `AI4SE_WARP_BRIDGE=0`。
+> `sddl` 是打包成可执行文件时的命令名；直接跑源码时用 `python -m src.cli`，参数一致。
 
 ---
 
-## 14. 依赖
+## 2. 项目在做什么
+
+一句话：**把「需求 → 计划 → 契约 → 代码 → 测试」固化成可重复、可中断、可续跑的流水线。**
+
+支撑这个目标的三条设计：
+
+| 设计 | 含义 | 好处 |
+|------|------|------|
+| **节点隔离** | 每个节点是独立 Agent 会话，只靠 `docs/` 里的 md 传递上下文 | 单个节点失败不影响其他节点；可单独重跑 |
+| **阶段门禁** | 每个阶段有 approval 块，内容就绪 + 用户确认才放行 | 不会「一路狂奔」到错误方向 |
+| **契约先行** | 技术方案（含 DDL）与 API 设计必须确认后才写代码 | 表结构和接口在动手前就定死，减少返工 |
+
+---
+
+## 3. 架构
+
+```
+┌──────────────────────────────────────────────────┐
+│  LangGraph —— workflow.py 定义图，router.py 决定起点 │
+│  route_next → 各节点 → 门禁判断 → 继续或 END        │
+└────────────────────────┬─────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────┐
+│  NodeRunner —— 渲染 prompt、调用 AI 工具、写产物    │
+└────────────────────────┬─────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────┐
+│  AITool —— omp / cursor / claude_code / codex / echo │
+└──────────────────────────────────────────────────┘
+```
+
+| 层 | 文件 | 职责 |
+|----|------|------|
+| 编排 | `src/workflow.py` | 节点、边、并行分支、门禁路由 |
+| 续跑决策 | `src/router.py` | 扫 `docs/` 判断从哪个节点开始 |
+| 门禁规则 | `src/phase_gate.py` | 内容就绪判定 + 用户确认判定 |
+| 节点执行 | `src/nodes/node_runner.py` | 渲染 prompt、调用工具、回写状态表 |
+| 工具适配 | `src/agents/` | 各 AI CLI 的调用差异 |
+| 状态 | `src/state.py` | `DevWorkflowState` 字段定义 |
+
+业务代码和 `docs/` 始终在 **`app_root`**（业务工程根），不写进本仓库。
+
+---
+
+## 4. 流水线
+
+### 4.1 全图
+
+```mermaid
+flowchart TD
+  START([启动]) --> ROUTE["route_next<br/>扫 docs 定起点"]
+  ROUTE --> REQ["需求分析与澄清<br/>interactive"]
+  ROUTE --> PLAN["计划 + 用例<br/>headless 并行"]
+  ROUTE --> REVIEW["计划评审<br/>interactive"]
+  ROUTE --> TASKS["任务拆分<br/>interactive"]
+  ROUTE --> TECH["技术方案设计<br/>interactive"]
+  ROUTE --> API["API 设计<br/>interactive"]
+  ROUTE --> IMPL["代码实现<br/>interactive"]
+  ROUTE --> VERIFY["测试自验证<br/>interactive"]
+
+  REQ -->|"内容就绪<br/>+ approved"| PLAN
+  REQ -->|"未就绪"| PAUSE(["END<br/>待续跑"])
+  PLAN -->|"plan 与用例都就绪"| REVIEW
+  PLAN -->|"未就绪"| PAUSE
+  REVIEW -->|"review + plan 都 approved"| TASKS
+  REVIEW -->|"未完成"| PAUSE
+  TASKS -->|"tasks approved"| TECH
+  TASKS -->|"未完成"| PAUSE
+  TECH -->|"tech_design approved"| API
+  TECH -->|"未完成"| PAUSE
+  API -->|"api_design approved"| IMPL
+  API -->|"未完成"| PAUSE
+  IMPL --> VERIFY
+  VERIFY --> AIREVIEW["AI 代码评审"]
+  AIREVIEW --> COMMIT["提交代码"]
+  COMMIT --> DONE([完成])
+```
+
+任何一道门禁没过，流程就停在 `END`。这不是故障 —— 是设计。处理完再续跑即可。
+
+### 4.2 节点清单
+
+| 节点 ID | 名称 | 模式 | 产出文件 | 关键约束 |
+|---------|------|------|----------|----------|
+| `analyze_requirements` | 需求分析与澄清 | interactive | `01-requirements.md` | 澄清清单全部消解 + `requirement_approval` |
+| `create_plan` | 制定计划 | headless | `02-plan.md` | 与用例并行执行 |
+| `design_test_cases` | 设计测试用例 | headless | `02-test-cases.md` | 与计划并行执行 |
+| `review_plan` | 计划评审 | interactive | `02-plan-review.md` | `review_plan_approval` + plan 同步确认 |
+| `split_tasks` | 任务拆分 | interactive | `03-tasks.md` | `tasks_approval` |
+| **`design_tech_solution`** | **技术方案设计** | interactive | `03-technical-design.md` | 领域命名 + 完整 DDL + `tech_design_approval` |
+| **`design_api`** | **API 设计** | interactive | `03-api-design.md` | 接口/请求/响应/错误码 + `api_design_approval` |
+| `implement_code` | 代码实现 | interactive | `04-implementation.md` + 业务代码 | 只写生产代码，不写测试；DDL 不执行 |
+| `verify_tests` | 测试自验证 | interactive | `05-test-report.md` + 测试代码 | 严格按用例执行，输出置信度 |
+| `ai_review` | AI 代码评审 | interactive | `06-ai-review.md` | — |
+| `commit_code` | 提交代码 | interactive | `07-commit.md` | 禁止提交 `docs_dir` |
+
+`create_plan` 与 `design_test_cases` 由 `parallel_plan_and_tests` 用线程池并行调用，图上是同一个节点。
+
+### 4.3 两种运行模式
+
+| 模式 | 行为 | 适用 |
+|------|------|------|
+| `interactive` | 继承终端，与 Agent 对话；产出写入后自动结束会话 | 需要人决策的阶段 |
+| `headless` | `agent -p` 非交互，直接写完整 md | 机械性生成阶段 |
+
+macOS 上 Web 操作台跑 interactive 节点时，会通过 **Warp** 启动 CLI。Warp 已在运行就复用当前窗口，未运行才新开窗（详见 WEB_UI.md §5）。
+
+### 4.4 续跑
+
+启动时 `router.determine_start_node()` 扫 `docs/<需求名>/` 决定起点，规则大致是：
+
+1. 有 `07-commit.md` 且 `completed` → 已完成，不跑
+2. 否则按 checkpoint 链倒序找最靠后的产出：`06` → `05` → `04` → `03-api-design` → `03-technical-design` → `03-tasks` → `02-plan-review` → …
+3. 找到之后，若该阶段门禁未过 → 从该节点重跑；门禁已过 → 进入下一个尚未完成的节点
+
+**老项目升级友好**：已有任务拆分但缺技术方案的项目，续跑会自动补跑 `design_tech_solution`，再补 `design_api`，不会直接跳到写代码。
+
+每个产出 md 末尾都有 **Workflow 状态** 表（`node` / `status` / `next_node` / `pending_count`），便于人工查看。但续跑判断以「文件存在 + approval 块 + 门禁规则」为准，不只看 `next_node`。
+
+---
+
+## 5. 产出文档链
+
+所有产出都在业务工程内：
+
+```text
+<app_root>/
+├── docs/
+│   ├── requirements/                # 需求输入（你手写）
+│   │   └── my-feature.md
+│   └── my-feature/                  # 流水线产出
+│       ├── 00-requirement.md        # 原始需求存档
+│       ├── draft/                   # 草稿
+│       ├── 01-requirements.md       # 需求定稿
+│       ├── 02-plan.md               # 实现计划
+│       ├── 02-test-cases.md         # 测试用例
+│       ├── 02-plan-review.md        # 计划评审结论
+│       ├── 03-tasks.md              # 任务拆分
+│       ├── 03-technical-design.md   # 技术方案（DDL / 领域模型）
+│       ├── 03-api-design.md         # API 契约
+│       ├── 04-implementation.md     # 实现报告
+│       ├── 05-test-report.md        # 测试报告
+│       ├── 06-ai-review.md          # 评审结论
+│       ├── 07-commit.md             # 提交记录
+│       ├── e2e-screenshots/         # E2E 截图
+│       └── temp-prompts/            # 渲染后的 prompt 存档
+└── sdd-loop-workflow-config/        # init 生成的项目配置
+```
+
+需求目录名默认从 `--file` 文件名或 `--name` 推导（`my-feature-requirement.md` → `my-feature`）。
+
+### 5.1 技术方案（`03-technical-design.md`）
+
+定位是**给人做全局把控的短文档**，不是设计说明书。核心是 DDL 与领域命名，实现只讲方向。正文（不含代码块）建议 150 行以内。
+
+| 章节 | 内容 |
+|------|------|
+| `## 背景与目标` | 做什么（2-3 句）+ 非目标 |
+| `## 领域模型与术语` | **术语清单**（术语 / 英文命名 / 定义 / 与现有概念的关系，≤15 条）+ `classDiagram` |
+| `## 数据结构及说明` | **完整可执行 DDL** + 字段说明表 |
+| `## 实现方向` | 分几步、谁调谁、用什么模型或设计模式、关键取舍 |
+| `## 关键接口` | 方法 / 路径 / 入参 / 出参 |
+| `## 兼容性与风险` | ≤3 条 |
+| `## 人工后续事项` | 需人工执行的 DDL / 配置 / 权限 |
+
+前五节缺任一即门禁不通过。**必须用户确认**后 `tech_design_approval` 才是 `approved`。
+
+规范细则：[`ai-rules/tech-solution.md`](./ai-rules/tech-solution.md)
+
+### 5.2 API 设计（`03-api-design.md`）
+
+定位是**前后端对接契约** —— 照着它能各写各的、不用互相问。
+
+| 章节 | 内容 |
+|------|------|
+| `## 契约概览` | 路径前缀/版本、鉴权、分页、通用错误结构 |
+| `## 接口清单` | # / 方法 / 路径 / 用途 / 归属 |
+| `## 请求` | 路径参数、查询参数、请求体字段表 |
+| `## 响应` | 成功示例 JSON + 响应字段表 |
+| `## 错误码` | 错误码 / HTTP / 触发条件 / 前端处理建议 |
+| `## 兼容性与变更` | 是否改动既有接口、存量影响 |
+
+纯前端或明确无新增接口时，正文写「本次不涉及新增接口」并列出复用的既有接口即可。
+
+字段命名必须对齐技术方案的术语清单；示例 JSON 要字段完整、前端可直接 mock。
+
+规范细则：[`ai-rules/api-design.md`](./ai-rules/api-design.md)
+
+### 5.3 approval 块一览
+
+| 阶段 | YAML 块 | 写入节点 |
+|------|---------|----------|
+| 需求 | `requirement_approval` | `analyze_requirements` |
+| 计划 | `plan_approval` | `create_plan` / `review_plan` |
+| 用例 | `test_cases_approval` | QA 异步审批 |
+| 计划评审 | `review_plan_approval` | `review_plan` |
+| 任务 | `tasks_approval` | `split_tasks` |
+| 技术方案 | `tech_design_approval` | `design_tech_solution` |
+| API 设计 | `api_design_approval` | `design_api` |
+
+`--auto` 模式下，内容就绪即视为通过，不等人写 `approved`。
+
+---
+
+## 6. 配置
+
+配置分两层，**业务侧覆盖引擎侧**。
+
+```mermaid
+flowchart LR
+  A["引擎默认<br/>config/workflow.yaml"] --> C["运行时合并"]
+  B["业务覆盖<br/>sdd-loop-workflow-config/<br/>workflow.yaml"] --> C
+  C --> D["节点最终配置<br/>tool / model / 阈值"]
+  style B fill:#1a3d2e,stroke:#6f6,color:#fff
+```
+
+### 6.1 业务侧配置（init 生成）
+
+```text
+<app_root>/sdd-loop-workflow-config/
+├── workflow.yaml                   # docs_dir、defaults.tool、各节点 tool/model/阈值
+├── ai-rules.yaml                   # 各节点注入哪些规则 md
+├── suggestion-confidence-rules.yaml # 推荐把握度打分规则
+└── ai-rules/                       # 规则正文
+    ├── project-standards.md
+    ├── tech-solution.md
+    └── api-design.md
+```
+
+`ai-rules.yaml` 示例：
+
+```yaml
+ai_rules_dir: ai-rules
+nodes:
+  implement_code:
+    - project-standards.md
+    - tech-solution.md
+    - api-design.md
+  design_api:
+    - project-standards.md
+    - api-design.md
+```
+
+未配置的节点不注入规则，流程照样能跑。
+
+### 6.2 节点配置
+
+每个节点在 `config/workflow.yaml` 里由四件事定义：
+
+```yaml
+design_api:
+  name: API 设计
+  tool: omp                       # 用哪个 AI 工具
+  mode: interactive               # interactive | headless
+  prompt: prompts/03_design_api.md
+  prompt_auto: prompts/03_design_api.auto.md   # --auto 时用这份
+  output: 03-api-design.md
+  inputs:                         # 这个节点能看到什么
+    - doc: 03-technical-design.md
+    - state: requirement_type
+```
+
+`inputs` 决定上下文 —— **没列进来的文档，节点读不到**。这是控制 prompt 体积和防止串味的关键机制。
+
+### 6.3 推荐把握度阈值
+
+每个节点可配 `recommendation_threshold`（默认 0.8）。澄清项的 `suggestion_confidence` 达到阈值时自动采纳推荐方案，不再打断用户。调低 = 更少打断，调高 = 更多确认。
+
+---
+
+## 7. 扩展
+
+### 7.1 新增节点
+
+一条新节点要动五个地方：
+
+```mermaid
+flowchart LR
+  A["1. config/workflow.yaml<br/>节点定义"] --> B["2. prompts/<br/>人工 + 无人值守两版"]
+  B --> C["3. src/workflow.py<br/>add_node + 条件边"]
+  C --> D["4. src/phase_gate.py<br/>PhaseConfig + 校验函数"]
+  D --> E["5. src/router.py<br/>ROUTABLE_NODES + checkpoint"]
+  style A fill:#1a3d2e,stroke:#6f6,color:#fff
+```
+
+另外别忘了把新节点 ID 加进 `src/webapp.py` 的 `NODE_IDS` 和 `src/settings_service.py` 的 `NODE_ORDER`，否则 Web 操作台不认识它。
+
+参考实现：`design_api` 就是按这个模式加的，相关测试在 `tests/test_api_design_node.py`。
+
+### 7.2 新增 AI 工具
+
+1. 在 `src/agents/` 实现 `AITool` 接口（`run` + `run_interactive`）
+2. 注册到 `src/agents/registry.py`
+3. 配置里 `tool: 你的名字`
+
+现有工具：`omp` / `cursor` / `claude_code` / `codex` / `echo`
+
+### 7.3 调整规则
+
+规则分两层：
+
+- **引擎级** `ai-rules/*.md` —— 通用约束（如「技术方案必须含 DDL」）
+- **业务级** `<app_root>/sdd-loop-workflow-config/ai-rules/*.md` —— 项目约定（如「表名用 biz_ 前缀」）
+
+业务级优先级更高。在 `ai-rules.yaml` 里挂到对应节点即可生效。
+
+### 7.4 调整流程
+
+拓扑写死在 `src/workflow.py`，改 YAML 不会改变图结构。要加分支、改并行、改门禁顺序，都得改代码。
+
+---
+
+## 8. 开发与测试
+
+### 8.1 跑测试
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+测试全部用标准库 `unittest`，不依赖 pytest。
+
+| 文件 | 覆盖 |
+|------|------|
+| `tests/test_tech_design_node.py` | 技术方案节点：门禁、续跑、prompt 内容 |
+| `tests/test_api_design_node.py` | API 设计节点：门禁、续跑、上下文注入 |
+| `tests/test_qa_insights.py` | 测试报告解析：置信度、用例结果、问题收集 |
+| `tests/test_case_catalog.py` | 测试用例文档解析 |
+
+### 8.2 改前端
+
+```bash
+cd webui
+pnpm install
+pnpm dev          # 开发服务器
+pnpm build        # 构建到 dist/（serve_ui.py 会读这里）
+pnpm typecheck    # 类型检查
+```
+
+Vben 模板自带的部分文件有历史类型错误（`packages/effects/layouts`、`vxe-table` 声明缺失等），与业务代码无关。
+
+---
+
+## 9. 常见问题
+
+| 现象 | 原因 / 处理 |
+|------|-------------|
+| 流程停在某个节点不往下走 | 门禁未过。看产出 md 里的 approval 块和 Workflow 状态表，补齐或续跑 |
+| 续跑报「未知节点: xxx」 | 旧版本把工具名写进了 `current_node`。升级到最新代码后重试 |
+| 每个节点都新开 Warp 窗口 | 应复用当前窗口。确认代码是最新的；日志里应出现「复用已有 Warp 窗口」 |
+| `EPERM: operation not permitted` | 业务工程在 `~/Downloads`、`~/Desktop`、`~/Documents` 下被 macOS TCC 拦截。给 Warp 和 omp 开完全磁盘访问，或把项目移到 `~/IdeaProjects` |
+| 日志提示手动执行 `bash ~/.ai4se/warp/*.sh` | 自动化权限不足。系统设置 → 隐私与安全性 → 自动化，允许 Terminal / Cursor 控制 Warp 和 System Events |
+| Web 操作台页面白屏 | 前端产物与源码不一致。`cd webui && pnpm build` 后重启服务，并强制刷新浏览器 |
+| 一直显示「排队」 | 同一项目有未结束的 run 占着锁。等它结束，或在界面上取消卡死的 run |
+| 服务重启后任务变「中断」 | 预期行为。中断的 run 可直接「一键续跑」 |
+| 端口 8787 被占用 | `lsof -i :8787 -t \| xargs kill` |
+
+---
+
+## 10. 仓库结构
+
+```text
+loop-ai-sdd-workflow-with-ui/
+├── README.md                   # 本文
+├── WEB_UI.md                   # Web 操作台使用指南
+│
+├── start.sh / start.cmd / start.ps1    # CLI 入口
+├── start_ui.sh / start_ui_dev.sh       # Web 操作台入口
+├── run.py                      # CLI 主程序
+├── serve_ui.py                 # Web 服务
+│
+├── config/
+│   ├── workflow.yaml           # 引擎默认节点编排
+│   ├── suggestion-confidence-rules.yaml
+│   ├── omp-workflow.yaml       # omp 工作流覆盖配置
+│   ├── mcp/servers.json        # Playwright MCP
+│   └── sdd-loop-workflow-config/   # init 的模板真源
+│
+├── prompts/                    # 各节点 prompt
+├── ai-rules/                   # 引擎级通用规则
+├── skills/start-workflow/      # 安装到业务工程侧的 skill
+│
+├── src/
+│   ├── workflow.py             # 图定义
+│   ├── router.py               # 续跑决策
+│   ├── phase_gate.py           # 门禁规则
+│   ├── state.py                # 状态字段
+│   ├── webapp.py               # Web API
+│   ├── cli.py                  # init / start 命令
+│   ├── agents/                 # AI 工具适配
+│   ├── nodes/                  # 节点执行器
+│   └── parsers/                # md 解析
+│
+├── tests/                      # 单元测试
+└── webui/                      # Vue3 + Vben 前端
+```
+
+运行时数据（`docs/`、`.dev-workflow/`、`sdd-loop-workflow-config/`）都在业务工程侧或已 gitignore，不进版本库。
+
+---
+
+## 11. 依赖
 
 | 包 | 用途 |
 |----|------|
-| `langgraph` | Workflow 编排 |
+| `langgraph` | 图编排 |
 | `pyyaml` | 配置加载 |
 | `python-dotenv` | 环境变量 |
 | `typing-extensions` | TypedDict |
 
-不依赖 LangChain / OpenAI SDK；AI 能力由 Cursor CLI、Claude Code CLI 等外部工具提供。
+不依赖 LangChain 或任何 LLM SDK —— AI 能力完全由外部 CLI 提供，换工具不需要改引擎。

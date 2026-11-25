@@ -224,12 +224,13 @@ class TechDesignResumeTest(unittest.TestCase):
         node = determine_start_node(self.docs, skip_clarification=True, auto=True)
         self.assertEqual(node, "design_tech_solution")
 
-    def test_tasks_done_with_tech_design_resumes_implement(self) -> None:
+    def test_tasks_done_with_tech_design_resumes_api_design(self) -> None:
+        """技术方案已确认、还没有 API 设计 → 续跑到 design_api。"""
         (self.docs / "03-technical-design.md").write_text(
             TECH_DESIGN_APPROVED, encoding="utf-8"
         )
         node = determine_start_node(self.docs, skip_clarification=True, auto=True)
-        self.assertEqual(node, "implement_code")
+        self.assertEqual(node, "design_api")
 
     def test_tech_design_pending_resumes_tech_design(self) -> None:
         (self.docs / "03-technical-design.md").write_text(

@@ -31,6 +31,7 @@ NODE_ORDER = (
     "review_plan",
     "split_tasks",
     "design_tech_solution",
+    "design_api",
     "implement_code",
     "verify_tests",
     "ai_review",

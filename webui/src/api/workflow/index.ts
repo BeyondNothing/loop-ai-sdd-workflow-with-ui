@@ -212,9 +212,22 @@ export interface TaskInsights {
     test_passed: boolean | null;
     result_rows: Record<string, number>;
     highlights: string[];
+    basis?: string;
+    rows: Array<{
+      id: string;
+      result: string;
+      name?: string;
+      case_type?: string;
+      priority?: string;
+      auto?: string;
+      detail?: string;
+      in_doc?: boolean;
+    }>;
+    issues: Array<{ source: string; level: string; text: string }>;
     file: string;
     threshold: number;
   };
+  case_catalog_size?: number;
 }
 
 export interface SystemMdContent {

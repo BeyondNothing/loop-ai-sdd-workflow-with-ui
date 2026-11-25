@@ -15,8 +15,8 @@
 #
 # ---------- 节点与提交 ----------
 # 常用节点 ID：analyze_requirements / create_plan / design_test_cases /
-#   review_plan / split_tasks / design_tech_solution / implement_code /
-#   verify_tests / ai_review / commit_code
+#   review_plan / split_tasks / design_tech_solution / design_api /
+#   implement_code / verify_tests / ai_review / commit_code
 # commit_code：不配 = 人工询问是否提交、--auto 跳过；配上并在 md 写明策略则按 md 执行。
 # 引擎硬约束：禁止提交 docs_dir（与是否配置 commit_code 无关）。
 # =============================================================================
@@ -37,9 +37,13 @@ nodes:
   design_tech_solution:
     - project-standards.md
     - tech-solution.md
+  design_api:
+    - project-standards.md
+    - api-design.md
   implement_code:
     - project-standards.md
     - tech-solution.md
+    - api-design.md
   verify_tests:
     - project-standards.md
   ai_review:

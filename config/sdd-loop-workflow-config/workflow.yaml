@@ -37,6 +37,10 @@ nodes:
     tool: omp
     model: ""
     recommendation_threshold: 0.8
+  design_api:
+    tool: omp
+    model: ""
+    recommendation_threshold: 0.8
   implement_code:
     tool: omp
     model: ""

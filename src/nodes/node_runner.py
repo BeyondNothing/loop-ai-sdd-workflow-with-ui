@@ -11,6 +11,7 @@ from ..requirement_dir import resolve_app_root, resolve_docs_path
 from ..ai_rules_loader import build_ai_rules_prompt
 from ..parsers.clarification_parser import parse_clarification_checklist
 from ..parsers.approval_parser import (
+    parse_api_design_approval,
     parse_plan_approval,
     parse_requirement_approval,
     parse_review_plan_approval,
@@ -377,6 +378,7 @@ class NodeRunner:
                     "review_plan": parse_review_plan_approval,
                     "split_tasks": parse_tasks_approval,
                     "design_tech_solution": parse_tech_design_approval,
+                    "design_api": parse_api_design_approval,
                 }[node_id]
                 state_key = cfg.approval_state_key if cfg else f"{node_id}_approved"
                 updates.update(approval_parser(final_content).to_state(state_key))
@@ -481,6 +483,7 @@ class NodeRunner:
             "review_plan": "plan_review",
             "split_tasks": "tasks",
             "design_tech_solution": "tech_design",
+            "design_api": "api_design",
             "implement_code": "implement",
             "verify_tests": "verify",
             "ai_review": "ai_review",

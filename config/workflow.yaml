@@ -108,6 +108,24 @@ nodes:
       - state: affected_modules
       - state: compatibility_risk
 
+  # API 设计：技术方案确认后、写代码前产出（接口契约 / 请求响应 / 错误码 / 鉴权）
+  design_api:
+    name: API 设计
+    tool: omp
+    mode: interactive
+    prompt: prompts/03_design_api.md
+    prompt_auto: prompts/03_design_api.auto.md
+    output: 03-api-design.md
+    inputs:
+      - doc: 01-requirements.md
+      - doc: 02-plan.md
+      - doc: 03-tasks.md
+      - doc: 03-technical-design.md
+      - doc: 03-api-design.md
+      - state: requirement_type
+      - state: affected_modules
+      - state: compatibility_risk
+
   implement_code:
     name: 代码实现
     tool: omp
@@ -121,6 +139,7 @@ nodes:
       - doc: 02-test-cases.md
       - doc: 03-tasks.md
       - doc: 03-technical-design.md
+      - doc: 03-api-design.md
       - state: requirement_type
       - state: affected_modules
       - state: compatibility_risk

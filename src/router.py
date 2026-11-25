@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .parsers.clarification_parser import parse_clarification_checklist
 from .parsers.approval_parser import (
+    parse_api_design_approval,
     parse_plan_approval,
     parse_requirement_approval,
     parse_review_plan_approval,
@@ -34,7 +35,8 @@ RESUME_CHECKPOINTS: list[tuple[str, str | None]] = [
     ("06-ai-review.md", "commit_code"),
     ("05-test-report.md", "ai_review"),
     ("04-implementation.md", "verify_tests"),
-    ("03-technical-design.md", "implement_code"),
+    ("03-api-design.md", "implement_code"),
+    ("03-technical-design.md", "design_api"),
     ("03-tasks.md", "design_tech_solution"),
     ("02-plan-review.md", "split_tasks"),
     ("02-test-cases.md", "review_plan"),
@@ -51,6 +53,7 @@ ROUTABLE_NODES = frozenset(
         "review_plan",
         "split_tasks",
         "design_tech_solution",
+        "design_api",
         "implement_code",
         "verify_tests",
         "ai_review",
@@ -190,6 +193,14 @@ def restore_state_from_docs(
             )
         )
 
+    api_design = docs_dir / "03-api-design.md"
+    if api_design.exists():
+        restored.update(
+            parse_api_design_approval(api_design.read_text(encoding="utf-8")).to_state(
+                "api_design_approved"
+            )
+        )
+
     report = docs_dir / "05-test-report.md"
     if report.exists():
         report_text = report.read_text(encoding="utf-8")
@@ -239,6 +250,10 @@ def _adjust_fallback(
     if filename == "03-technical-design.md":
         if not phase_complete(docs_dir, "design_tech_solution", state):
             return "design_tech_solution"
+        return "design_api"
+    if filename == "03-api-design.md":
+        if not phase_complete(docs_dir, "design_api", state):
+            return "design_api"
     return fallback_node
 
 
@@ -285,12 +300,25 @@ def _resolve_from_status(
         if filename == "03-tasks.md" and status.next_node in (
             "implement_code",
             "design_tech_solution",
+            "design_api",
         ):
             if not phase_complete(docs_dir, "split_tasks", state):
                 return "split_tasks"
             # 任务已确认：先补技术方案（旧产出会跳过新节点）
             if not phase_complete(docs_dir, "design_tech_solution", state):
                 return "design_tech_solution"
+            # 再补 API 设计
+            if not phase_complete(docs_dir, "design_api", state):
+                return "design_api"
+            return "implement_code"
+        if filename == "03-technical-design.md" and status.next_node in (
+            "implement_code",
+            "design_api",
+        ):
+            if not phase_complete(docs_dir, "design_tech_solution", state):
+                return "design_tech_solution"
+            if not phase_complete(docs_dir, "design_api", state):
+                return "design_api"
             return "implement_code"
         return status.next_node
 
@@ -347,19 +375,37 @@ def _infer_from_status_fields(
         return _resolve_after_tasks(docs_dir, state)
 
     if filename == "03-technical-design.md":
-        if phase_complete(docs_dir, "design_tech_solution", state):
+        if not phase_complete(docs_dir, "design_tech_solution", state):
+            return "design_tech_solution"
+        if not phase_complete(docs_dir, "design_api", state):
+            return "design_api"
+        return "implement_code"
+
+    if filename == "03-api-design.md":
+        if phase_complete(docs_dir, "design_api", state):
             return "implement_code"
-        return "design_tech_solution"
+        return "design_api"
 
     return None
 
 
+def _resolve_after_tech_design(docs_dir: Path, state: dict) -> str:
+    """技术方案已确认后的去向：先补 API 设计，确认后才进实现。"""
+    if not phase_complete(docs_dir, "design_tech_solution", state):
+        return "design_tech_solution"
+    if not phase_complete(docs_dir, "design_api", state):
+        return "design_api"
+    return "implement_code"
+
+
 def _resolve_after_tasks(docs_dir: Path, state: dict) -> str:
-    """任务拆分已确认后的去向：先补技术方案，方案确认后才进实现。"""
+    """任务拆分已确认后的去向：先补技术方案，再补 API 设计，最后进实现。"""
     if not phase_complete(docs_dir, "split_tasks", state):
         return "split_tasks"
     if not phase_complete(docs_dir, "design_tech_solution", state):
         return "design_tech_solution"
+    if not phase_complete(docs_dir, "design_api", state):
+        return "design_api"
     return "implement_code"
 
 
@@ -393,8 +439,11 @@ def _infer_without_status(
         return _resolve_after_tasks(path.parent, state)
 
     if filename == "03-technical-design.md":
-        if phase_complete(path.parent, "design_tech_solution", state):
+        return _resolve_after_tech_design(path.parent, state)
+
+    if filename == "03-api-design.md":
+        if phase_complete(path.parent, "design_api", state):
             return "implement_code"
-        return "design_tech_solution"
+        return "design_api"
 
     return None

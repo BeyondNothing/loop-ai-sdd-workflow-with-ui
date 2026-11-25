@@ -79,8 +79,16 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         final_file="03-technical-design.md",
         approval_block="tech_design_approval",
         approval_state_key="tech_design_approved",
-        next_node="implement_code",
+        next_node="design_api",
         min_body_chars=300,
+    ),
+    "design_api": PhaseConfig(
+        node_id="design_api",
+        final_file="03-api-design.md",
+        approval_block="api_design_approval",
+        approval_state_key="api_design_approved",
+        next_node="implement_code",
+        min_body_chars=250,
     ),
 }
 
@@ -123,6 +131,20 @@ def _validate_tech_design(content: str, cfg: PhaseConfig) -> bool:
     return all(section in body for section in TECH_DESIGN_REQUIRED_SECTIONS)
 
 
+def _validate_api_design(content: str, cfg: PhaseConfig) -> bool:
+    """API 设计：接口清单、请求、响应、错误码章节齐全。
+
+    纯前端或明确无接口的需求允许写「不涉及」：此时不要求契约章节，
+    但正文仍需说明复用了哪些既有接口，故保留较低字数门槛。
+    """
+    body = _body_without_status(content)
+    if "不涉及" in body and "接口清单" not in body:
+        return len(body) >= 120
+    if not _validate_generic_final(content, cfg):
+        return False
+    return all(section in body for section in API_DESIGN_REQUIRED_SECTIONS)
+
+
 CONTENT_VALIDATORS: dict[str, Callable[[str, PhaseConfig], bool]] = {
     "analyze_requirements": lambda content, cfg: _validate_generic_final(content, cfg)
     and _validate_requirements_final(content),
@@ -131,6 +153,7 @@ CONTENT_VALIDATORS: dict[str, Callable[[str, PhaseConfig], bool]] = {
     "review_plan": _validate_generic_final,
     "split_tasks": _validate_generic_final,
     "design_tech_solution": _validate_tech_design,
+    "design_api": _validate_api_design,
 }
 
 # 技术方案必备章节（缺任一即视为内容未就绪）：背景目标 + 领域命名 + DDL + 实现方向
@@ -141,6 +164,9 @@ TECH_DESIGN_REQUIRED_SECTIONS = (
     "数据结构及说明",
     "实现方向",
 )
+
+# API 设计必备章节：接口清单 + 请求 + 响应 + 错误码
+API_DESIGN_REQUIRED_SECTIONS = ("接口清单", "请求", "响应", "错误码")
 
 
 def phase_content_ready(docs_dir: Path, node_id: str, state: DevWorkflowState) -> bool:

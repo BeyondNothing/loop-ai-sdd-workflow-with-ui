@@ -24,7 +24,6 @@ import {
   Input,
   Menu,
   Modal,
-  Progress,
   Row,
   Select,
   Space,
@@ -39,6 +38,7 @@ import {
 import { renderMarkdown } from '#/utils/markdown';
 
 import PathPickerModal from './PathPickerModal.vue';
+import QaQualityPanel from './QaQualityPanel.vue';
 import { useWorkbench } from './use-workbench';
 
 const activeTab = ref('config');
@@ -191,19 +191,6 @@ const logFilterOptions = [
   { label: 'EPERM', value: 'eperm' },
   { label: '关键字', value: 'keyword' },
 ];
-
-const confidencePercent = computed(() => {
-  const score = taskInsights.value?.release_confidence?.score;
-  if (score == null || Number.isNaN(score)) return 0;
-  return Math.round(Math.min(1, Math.max(0, score)) * 100);
-});
-
-const confidenceColor = computed(() => {
-  const reached = taskInsights.value?.release_confidence?.reached_0_8;
-  if (reached === true) return '#52c41a';
-  if (reached === false) return '#faad14';
-  return '#1677ff';
-});
 
 function qaTagColor(status: string) {
   if (status === 'approved') return 'success';
@@ -830,7 +817,7 @@ async function onViewRun(runId: string) {
                   <span class="text-xs opacity-40">
                     {{ systemInfo?.os_name || '—' }} · 就绪
                   </span>
-                  <Button :loading="loading" size="large" type="primary" @click="startRun">
+                  <Button :loading="loading" size="large" type="primary" @click="startRun()">
                     <IconifyIcon class="mr-1.5" icon="lucide:play" />
                     执行任务
                   </Button>
@@ -844,112 +831,6 @@ async function onViewRun(runId: string) {
                 class="pipeline-panel grid h-full min-h-0 gap-3 overflow-hidden lg:grid-cols-[minmax(0,1fr)_minmax(280px,36%)]"
               >
                 <div class="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto pr-1">
-                <Card
-                  v-if="selectedTaskId"
-                  class="shrink-0"
-                  size="small"
-                  title="质量洞察"
-                >
-                  <div class="grid gap-4 md:grid-cols-[160px_1fr]">
-                    <div class="flex flex-col items-center justify-center gap-1">
-                      <Progress
-                        :percent="confidencePercent"
-                        :stroke-color="confidenceColor"
-                        type="dashboard"
-                        :width="108"
-                      />
-                      <div class="text-xs opacity-50">发布置信度</div>
-                      <Tag
-                        v-if="taskInsights?.release_confidence?.reached_0_8 != null"
-                        :color="
-                          taskInsights.release_confidence.reached_0_8 ? 'success' : 'warning'
-                        "
-                        class="m-0"
-                      >
-                        {{
-                          taskInsights.release_confidence.reached_0_8
-                            ? '已达 0.8'
-                            : '未达 0.8'
-                        }}
-                      </Tag>
-                      <span
-                        v-else-if="!taskInsights?.release_confidence?.has_report"
-                        class="text-xs opacity-40"
-                      >
-                        尚无 05-test-report
-                      </span>
-                    </div>
-                    <div class="min-w-0 space-y-2">
-                      <div class="flex flex-wrap items-center gap-2">
-                        <span class="text-xs opacity-50">用例 QA（异步，不阻塞）</span>
-                        <Tag
-                          :color="qaTagColor(taskInsights?.qa_review?.status || '')"
-                          class="m-0"
-                        >
-                          {{
-                            qaTagText(taskInsights?.qa_review?.status || '') ||
-                            '未检测'
-                          }}
-                        </Tag>
-                        <Button
-                          v-if="taskInsights?.qa_review?.status === 'pending'"
-                          :loading="loading"
-                          size="small"
-                          type="primary"
-                          @click="approveQa('approved')"
-                        >
-                          标记通过
-                        </Button>
-                        <Button
-                          v-if="taskInsights?.qa_review?.status === 'approved'"
-                          :loading="loading"
-                          size="small"
-                          @click="approveQa('pending')"
-                        >
-                          重置待审
-                        </Button>
-                      </div>
-                      <div class="flex flex-wrap gap-2 text-xs">
-                        <Tag class="m-0">
-                          pass {{ taskInsights?.release_confidence?.result_rows?.pass || 0 }}
-                        </Tag>
-                        <Tag class="m-0">
-                          fail {{ taskInsights?.release_confidence?.result_rows?.fail || 0 }}
-                        </Tag>
-                        <Tag class="m-0">
-                          skip {{ taskInsights?.release_confidence?.result_rows?.skip || 0 }}
-                        </Tag>
-                        <Tag
-                          v-if="taskInsights?.release_confidence?.test_passed != null"
-                          :color="
-                            taskInsights.release_confidence.test_passed
-                              ? 'success'
-                              : 'error'
-                          "
-                          class="m-0"
-                        >
-                          test_passed=
-                          {{ taskInsights.release_confidence.test_passed ? 'true' : 'false' }}
-                        </Tag>
-                      </div>
-                      <ul
-                        v-if="taskInsights?.release_confidence?.highlights?.length"
-                        class="m-0 list-disc pl-4 text-xs opacity-70"
-                      >
-                        <li
-                          v-for="(line, idx) in taskInsights.release_confidence.highlights"
-                          :key="idx"
-                        >
-                          {{ line }}
-                        </li>
-                      </ul>
-                      <div v-else class="text-xs opacity-40">
-                        解析自任务 docs 下的 02-test-cases / 05-test-report
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-
                 <Card
                   v-if="runTimeline.length"
                   size="small"
@@ -1164,6 +1045,15 @@ async function onViewRun(runId: string) {
                   </div>
                 </Card>
               </div>
+            </Tabs.TabPane>
+
+            <Tabs.TabPane key="qa" tab="QA 质量">
+              <QaQualityPanel
+                :insights="taskInsights"
+                :loading="loading"
+                @approve="approveQa"
+                @preview="(nodeId) => previewArtifact(nodeId, { modal: true })"
+              />
             </Tabs.TabPane>
 
             <Tabs.TabPane key="board" tab="优先级看板">

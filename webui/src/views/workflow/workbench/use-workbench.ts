@@ -38,6 +38,22 @@ function prefsKey(projectId: string) {
   return `ai-loop:workbench:prefs:${projectId}`;
 }
 
+const LAST_PROJECT_KEY = 'ai-loop:workbench:last-project';
+
+function readLastProjectId(): string {
+  if (typeof localStorage === 'undefined') return '';
+  return localStorage.getItem(LAST_PROJECT_KEY) || '';
+}
+
+function writeLastProjectId(projectId: string) {
+  if (typeof localStorage === 'undefined' || !projectId) return;
+  try {
+    localStorage.setItem(LAST_PROJECT_KEY, projectId);
+  } catch {
+    // ignore quota
+  }
+}
+
 function matchLogLine(line: string, mode: LogFilterMode, keyword: string): boolean {
   const lower = line.toLowerCase();
   if (mode === 'all') return true;
@@ -375,6 +391,7 @@ export function useWorkbench() {
         skipClar?: boolean;
         auto?: boolean;
         tool?: string;
+        lastTaskId?: string;
       };
       if (typeof data.headless === 'boolean') flags.headless = data.headless;
       if (typeof data.skipClar === 'boolean') flags.skipClar = data.skipClar;
@@ -385,12 +402,43 @@ export function useWorkbench() {
     }
   }
 
+  /** 该项目的偏好（含上次选中的任务）；不改变 flags */
+  function readProjectPrefs(projectId: string): { lastTaskId?: string } {
+    if (!projectId || typeof localStorage === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem(prefsKey(projectId));
+      if (!raw) return {};
+      return JSON.parse(raw) as { lastTaskId?: string };
+    } catch {
+      return {};
+    }
+  }
+
+  function pickRememberedTask(projectId: string): string {
+    return String(readProjectPrefs(projectId).lastTaskId || '');
+  }
+
+  function rememberTask(projectId: string, taskId: string) {
+    if (!projectId || !taskId || typeof localStorage === 'undefined') return;
+    try {
+      const current = readProjectPrefs(projectId);
+      localStorage.setItem(
+        prefsKey(projectId),
+        JSON.stringify({ ...current, lastTaskId: taskId }),
+      );
+    } catch {
+      // ignore quota
+    }
+  }
+
   function saveProjectPrefs() {
     if (!selectedProjectId.value || typeof localStorage === 'undefined') return;
     try {
+      const current = readProjectPrefs(selectedProjectId.value);
       localStorage.setItem(
         prefsKey(selectedProjectId.value),
         JSON.stringify({
+          ...current,
           headless: flags.headless,
           skipClar: flags.skipClar,
           auto: flags.auto,
@@ -418,7 +466,10 @@ export function useWorkbench() {
     const data = await workflowApi.getProjects();
     projects.value = data.projects || [];
     if (!selectedProjectId.value && projects.value.length) {
-      await selectProject(projects.value[0]!.project_id);
+      // 再次进入时优先回到上次的项目
+      const remembered = readLastProjectId();
+      const hit = projects.value.find((p) => p.project_id === remembered);
+      await selectProject((hit || projects.value[0]!).project_id);
     }
   }
 
@@ -438,6 +489,22 @@ export function useWorkbench() {
     }
     const data = await workflowApi.getTasks(selectedProjectId.value);
     tasks.value = data.tasks || [];
+  }
+
+  /** 最近活跃的任务：优先有执行记录的，其次按 updated_at 倒序 */
+  function pickRecentTask(list: TaskItem[]): TaskItem | null {
+    if (!list.length) return null;
+    const score = (t: TaskItem) => {
+      const ran = t.last_run_id ? 1 : 0;
+      const ts = Date.parse(t.updated_at || t.created_at || '') || 0;
+      return [ran, ts] as const;
+    };
+    return [...list].sort((a, b) => {
+      const [ra, ta] = score(a);
+      const [rb, tb] = score(b);
+      if (ra !== rb) return rb - ra;
+      return tb - ta;
+    })[0]!;
   }
 
   async function loadRuns() {
@@ -628,6 +695,7 @@ export function useWorkbench() {
 
   async function selectProject(projectId: string) {
     selectedProjectId.value = projectId;
+    writeLastProjectId(projectId);
     selectedTaskId.value = '';
     selectedRun.value = null;
     taskInsights.value = null;
@@ -646,12 +714,20 @@ export function useWorkbench() {
     await loadTaskQaBadges();
     void loadTaskBoard();
     connectRunEvents();
+
+    // 记住上次的任务；否则默认选中最近活跃的任务
+    const remembered = pickRememberedTask(projectId);
+    const target =
+      (remembered && tasks.value.find((t) => t.task_id === remembered)) ||
+      pickRecentTask(tasks.value);
+    if (target) await selectTask(target.task_id);
   }
 
   async function selectTask(taskId: string) {
     selectedTaskId.value = taskId;
     const task = tasks.value.find((t) => t.task_id === taskId);
     if (!task) return;
+    rememberTask(selectedProjectId.value, taskId);
     form.taskName = task.task_name;
     form.prdPath = task.requirement_prd_path;
     form.requirement = task.requirement_text;
